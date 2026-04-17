@@ -1,3 +1,107 @@
 from django.db import models
+from django.contrib.auth.models import User
 
-# Create your models here.
+
+class Coin(models.Model):
+    symbol = models.CharField(max_length=20, unique=True)
+    name = models.CharField(max_length=100)
+    coingecko_id = models.CharField(max_length=100, unique=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.symbol})"
+
+    class Meta:
+        db_table = 'coin'
+
+
+class Trade(models.Model):
+    TRADE_TYPE_CHOICES = [
+        ('buy', 'Buy'),
+        ('sell', 'Sell'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trades')
+    coin = models.ForeignKey(Coin, on_delete=models.CASCADE, related_name='trades')
+    trade_type = models.CharField(max_length=10, choices=TRADE_TYPE_CHOICES)
+    quantity = models.FloatField()
+    buy_price = models.FloatField(null=True, blank=True)
+    sell_price = models.FloatField(null=True, blank=True)
+    fee = models.FloatField(default=0.0)
+    trade_date = models.DateTimeField()
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.trade_type.upper()} {self.quantity} {self.coin.symbol} by {self.user.username}"
+
+    class Meta:
+        db_table = 'trade'
+
+
+class EmotionTag(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+    color = models.CharField(max_length=20)
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        db_table = 'emotion_tag'
+
+
+class TradeEmotion(models.Model):
+    trade = models.ForeignKey(Trade, on_delete=models.CASCADE, related_name='emotions')
+    emotion_tag = models.ForeignKey(EmotionTag, on_delete=models.CASCADE, related_name='trade_emotions')
+
+    def __str__(self):
+        return f"{self.trade} — {self.emotion_tag}"
+
+    class Meta:
+        db_table = 'trade_emotion'
+        unique_together = ('trade', 'emotion_tag')
+
+
+class PortfolioSnapshot(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='portfolio_snapshots')
+    coin = models.ForeignKey(Coin, on_delete=models.CASCADE, related_name='portfolio_snapshots')
+    total_quantity = models.FloatField()
+    avg_buy_price = models.FloatField()
+    unrealized_pnl = models.FloatField()
+    snapshot_date = models.DateTimeField()
+
+    def __str__(self):
+        return f"Snapshot: {self.user.username} — {self.coin.symbol} @ {self.snapshot_date}"
+
+    class Meta:
+        db_table = 'portfolio_snapshot'
+
+
+class MonthlyReport(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='monthly_reports')
+    year = models.IntegerField()
+    month = models.IntegerField()
+    total_realized_pnl = models.FloatField()
+    win_rate = models.FloatField()
+    total_trades = models.IntegerField()
+    winning_trades = models.IntegerField()
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Report: {self.user.username} — {self.year}/{self.month:02d}"
+
+    class Meta:
+        db_table = 'monthly_report'
+        unique_together = ('user', 'year', 'month')
+
+
+class AIFeedback(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_feedbacks')
+    prompt_summary = models.TextField()
+    feedback_text = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"AI Feedback for {self.user.username} @ {self.created_at}"
+
+    class Meta:
+        db_table = 'ai_feedback'
