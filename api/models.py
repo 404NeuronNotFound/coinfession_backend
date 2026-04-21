@@ -137,3 +137,16 @@ class UserPreference(models.Model):
     notify_untagged       = models.BooleanField(default=True)
     notify_weekly         = models.BooleanField(default=False)
     notification_email    = models.EmailField(blank=True, null=True)
+
+
+class DataTransferLog(models.Model):
+    EXPORT = 'export'
+    IMPORT = 'import'
+    TYPE_CHOICES = [(EXPORT,'Export'),(IMPORT,'Import')]
+
+    user        = models.ForeignKey(User, on_delete=models.CASCADE)
+    type        = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    filename    = models.CharField(max_length=255)
+    result      = models.TextField()
+    status      = models.CharField(max_length=10)  # 'ok', 'error'
+    created_at  = models.DateTimeField(auto_now_add=True)
