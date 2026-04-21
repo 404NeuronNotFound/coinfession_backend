@@ -105,3 +105,13 @@ class AIFeedback(models.Model):
 
     class Meta:
         db_table = 'ai_feedback'
+
+
+class APIKey(models.Model):
+    user      = models.ForeignKey(User, on_delete=models.CASCADE)
+    provider  = models.CharField(max_length=50)  # 'anthropic', 'coingecko'
+    key_encrypted = models.TextField()            # AES-256 encrypted
+    key_suffix    = models.CharField(max_length=4) # last 4 chars, stored plain
+    plan      = models.CharField(max_length=20, default='unknown')
+    last_used = models.DateTimeField(null=True)
+    created_at= models.DateTimeField(auto_now_add=True)
