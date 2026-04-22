@@ -150,3 +150,30 @@ class DataTransferLog(models.Model):
     result      = models.TextField()
     status      = models.CharField(max_length=10)  # 'ok', 'error'
     created_at  = models.DateTimeField(auto_now_add=True)
+
+
+class UserProfile(models.Model):
+    """
+    Extended user profile with display preferences and personal information.
+    One-to-one relationship with Django's User model.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    
+    # Personal Information
+    display_name = models.CharField(max_length=100, blank=True, null=True)
+    bio = models.TextField(blank=True, null=True)
+    profile_photo_url = models.URLField(blank=True, null=True)
+    
+    # Display Preferences
+    currency = models.CharField(max_length=10, default='USD')
+    timezone = models.CharField(max_length=50, default='UTC')
+    
+    # Account Metadata
+    member_since = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Profile: {self.user.username}"
+    
+    class Meta:
+        db_table = 'user_profile'
