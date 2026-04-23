@@ -177,3 +177,61 @@ class UserProfile(models.Model):
     
     class Meta:
         db_table = 'user_profile'
+
+
+class UserSession(models.Model):
+    """
+    Tracks active user sessions with device and location information.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='sessions')
+    
+    # Device Information
+    device_id = models.CharField(max_length=255, unique=True)
+    browser = models.CharField(max_length=100, blank=True)
+    os = models.CharField(max_length=100, blank=True)
+    
+    # Location Information
+    ip_address = models.GenericIPAddressField()
+    location = models.CharField(max_length=255, blank=True)
+    
+    # Session Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_active = models.DateTimeField(auto_now=True)
+    is_current = models.BooleanField(default=False)
+    
+    def __str__(self):
+        return f"Session: {self.user.username} — {self.browser} on {self.os}"
+    
+    class Meta:
+        db_table = 'user_session'
+
+
+class RefreshToken(models.Model):
+    """
+    Tracks JWT refresh tokens for session management and revocation.
+    """
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='refresh_tokens')
+    session = models.ForeignKey(UserSession, on_delete=models.CASCADE, related_name='tokens', null=True, blank=True)
+    
+    # Token Information
+    token_hash = models.CharField(max_length=255, unique=True)  # SHA256 hash of token
+    token_suffix = models.CharField(max_length=10)  # Last 10 chars for display
+    
+    # Token Lifecycle
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    
+    # Usage Tracking
+    last_used = models.DateTimeField(null=True, blank=True)
+    
+    def is_valid(self):
+        """Check if token is still valid (not expired and not revoked)"""
+        from django.utils import timezone
+        return self.revoked_at is None and self.expires_at > timezone.now()
+    
+    def __str__(self):
+        return f"Token: {self.user.username} — {self.token_suffix}"
+    
+    class Meta:
+        db_table = 'refresh_token'

@@ -1,6 +1,6 @@
-﻿from django.contrib.auth.models import User
+from django.contrib.auth.models import User
 from rest_framework import serializers
-from .models import UserProfile
+from .models import UserProfile, UserSession, RefreshToken
 
 
 class UserSerializers(serializers.ModelSerializer):
@@ -102,3 +102,44 @@ class ChangePasswordSerializer(serializers.Serializer):
             })
         
         return data
+
+class UserSessionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserSession
+        fields = [
+            'id',
+            'device_id',
+            'browser',
+            'os',
+            'ip_address',
+            'location',
+            'created_at',
+            'last_active',
+            'is_current',
+        ]
+        read_only_fields = [
+            'id',
+            'created_at',
+            'last_active',
+        ]
+
+
+class RefreshTokenSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RefreshToken
+        fields = [
+            'id',
+            'token_suffix',
+            'created_at',
+            'expires_at',
+            'revoked_at',
+            'last_used',
+        ]
+        read_only_fields = [
+            'id',
+            'token_suffix',
+            'created_at',
+            'expires_at',
+            'revoked_at',
+            'last_used',
+        ]
