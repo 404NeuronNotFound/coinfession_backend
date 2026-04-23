@@ -71,3 +71,34 @@ class UserProfileUpdateSerializer(serializers.ModelSerializer):
             'currency',
             'timezone',
         ]
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True, required=True)
+    new_password = serializers.CharField(write_only=True, required=True)
+    confirm_password = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, data):
+        user = self.context['request'].user
+        
+        if not user.check_password(data['current_password']):
+            raise serializers.ValidationError({
+                'current_password': 'Current password is incorrect.'
+            })
+        
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({
+                'confirm_password': 'New passwords do not match.'
+            })
+        
+        if user.check_password(data['new_password']):
+            raise serializers.ValidationError({
+                'new_password': 'New password must be different from current password.'
+            })
+        
+        if len(data['new_password']) < 8:
+            raise serializers.ValidationError({
+                'new_password': 'Password must be at least 8 characters long.'
+            })
+        
+        return data

@@ -4,7 +4,7 @@ from rest_framework import generics, status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from .serializers import UserSerializers, UserProfileSerializer, UserProfileUpdateSerializer
+from .serializers import UserSerializers, UserProfileSerializer, UserProfileUpdateSerializer, ChangePasswordSerializer
 from .models import UserProfile
 
 
@@ -73,4 +73,48 @@ class UserProfileRetrieveUpdateView(generics.RetrieveUpdateAPIView):
             UserProfileSerializer(instance).data,
             status=status.HTTP_200_OK
         )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """
+    POST /api/user/change-password/
+    Change the authenticated user's password.
+    
+    Request body:
+    {
+        "current_password": "old_password",
+        "new_password": "new_password_123",
+        "confirm_password": "new_password_123"
+    }
+    
+    Response:
+    {
+        "message": "Password changed successfully.",
+        "status": "success"
+    }
+    """
+    serializer = ChangePasswordSerializer(
+        data=request.data,
+        context={'request': request}
+    )
+    
+    if serializer.is_valid():
+        user = request.user
+        user.set_password(serializer.validated_data['new_password'])
+        user.save()
+        
+        return Response(
+            {
+                'message': 'Password changed successfully.',
+                'status': 'success'
+            },
+            status=status.HTTP_200_OK
+        )
+    
+    return Response(
+        serializer.errors,
+        status=status.HTTP_400_BAD_REQUEST
+    )
 
