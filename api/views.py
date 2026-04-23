@@ -287,3 +287,113 @@ def revoke_token(request, token_id):
         },
         status=status.HTTP_200_OK
     )
+
+
+# ─── Custom Token Views ────────────────────────────────────
+from rest_framework_simplejwt.views import TokenObtainPairView as JWTTokenObtainPairView
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+import hashlib
+from django.utils import timezone
+from datetime import timedelta
+
+
+class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    Custom serializer that creates a session and token record on login.
+    """
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        
+        # Get user from validated credentials
+        user = self.user
+        
+        # Extract device info from request headers
+        request = self.context.get('request')
+        user_agent = request.META.get('HTTP_USER_AGENT', 'Unknown')
+        ip_address = self.get_client_ip(request)
+        
+        # Parse user agent for browser and OS (simplified)
+        browser = self.parse_browser(user_agent)
+        os = self.parse_os(user_agent)
+        
+        # Create or update session
+        device_id = hashlib.sha256(f"{ip_address}{user_agent}".encode()).hexdigest()[:32]
+        session, created = UserSession.objects.get_or_create(
+            user=user,
+            device_id=device_id,
+            defaults={
+                'browser': browser,
+                'os': os,
+                'ip_address': ip_address,
+                'location': 'Unknown',  # Could use IP geolocation service
+                'is_current': True,
+            }
+        )
+        
+        # Mark other sessions as not current
+        UserSession.objects.filter(user=user).exclude(id=session.id).update(is_current=False)
+        session.is_current = True
+        session.save()
+        
+        # Create refresh token record
+        refresh_token = data.get('refresh')
+        if refresh_token:
+            token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
+            token_suffix = refresh_token[-10:]
+            
+            RefreshToken.objects.create(
+                user=user,
+                session=session,
+                token_hash=token_hash,
+                token_suffix=token_suffix,
+                expires_at=timezone.now() + timedelta(days=7),  # Match your JWT settings
+            )
+        
+        return data
+    
+    @staticmethod
+    def get_client_ip(request):
+        """Get client IP from request"""
+        x_forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+        if x_forwarded_for:
+            ip = x_forwarded_for.split(',')[0]
+        else:
+            ip = request.META.get('REMOTE_ADDR')
+        return ip
+    
+    @staticmethod
+    def parse_browser(user_agent):
+        """Extract browser from user agent"""
+        if 'Chrome' in user_agent:
+            return 'Chrome'
+        elif 'Safari' in user_agent:
+            return 'Safari'
+        elif 'Firefox' in user_agent:
+            return 'Firefox'
+        elif 'Edge' in user_agent:
+            return 'Edge'
+        else:
+            return 'Unknown'
+    
+    @staticmethod
+    def parse_os(user_agent):
+        """Extract OS from user agent"""
+        if 'Windows' in user_agent:
+            return 'Windows'
+        elif 'Mac' in user_agent:
+            return 'macOS'
+        elif 'Linux' in user_agent:
+            return 'Linux'
+        elif 'iPhone' in user_agent or 'iPad' in user_agent:
+            return 'iOS'
+        elif 'Android' in user_agent:
+            return 'Android'
+        else:
+            return 'Unknown'
+
+
+class CustomTokenObtainPairView(JWTTokenObtainPairView):
+    """
+    Custom token view that creates session and token records.
+    """
+    serializer_class = CustomTokenObtainPairSerializer
