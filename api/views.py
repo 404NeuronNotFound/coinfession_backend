@@ -316,18 +316,19 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         browser = self.parse_browser(user_agent)
         os = self.parse_os(user_agent)
         
-        # Create or update session
-        device_id = hashlib.sha256(f"{ip_address}{user_agent}".encode()).hexdigest()[:32]
-        session, created = UserSession.objects.get_or_create(
+        # Generate unique device_id for this login session
+        import uuid
+        device_id = hashlib.sha256(f"{ip_address}{user_agent}{uuid.uuid4()}".encode()).hexdigest()[:32]
+        
+        # Always create a new session on login
+        session = UserSession.objects.create(
             user=user,
             device_id=device_id,
-            defaults={
-                'browser': browser,
-                'os': os,
-                'ip_address': ip_address,
-                'location': 'Unknown',  # Could use IP geolocation service
-                'is_current': True,
-            }
+            browser=browser,
+            os=os,
+            ip_address=ip_address,
+            location='Unknown',  # Could use IP geolocation service
+            is_current=True,
         )
         
         # Mark other sessions as not current
