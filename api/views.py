@@ -398,3 +398,386 @@ class CustomTokenObtainPairView(JWTTokenObtainPairView):
     Custom token view that creates session and token records.
     """
     serializer_class = CustomTokenObtainPairSerializer
+
+
+# ─── Trade Log Views ──────────────────────────────────────
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.filters import SearchFilter, OrderingFilter
+from .serializers import (
+    TradeSerializer, TradeSummarySerializer, CoinSerializer,
+    EmotionTagSerializer
+)
+from .models import Trade, Coin, EmotionTag, TradeEmotion
+from django.db.models import Q, F, Sum, Count, Case, When, FloatField
+from django.http import StreamingHttpResponse
+import csv
+import requests
+
+
+class TradePagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
+class TradeListCreateView(generics.ListCreateAPIView):
+    """
+    GET /api/trades/
+    List all trades for the authenticated user with filtering and pagination.
+    
+    Query Parameters:
+    - coin: Filter by coin symbol or name (icontains)
+    - type: Filter by trade type ('buy' or 'sell')
+    - emotion: Filter by emotion tag ID
+    - pnl: Filter by 'profit' or 'loss'
+    - date_from: Filter trades from this date (YYYY-MM-DD)
+    - date_to: Filter trades until this date (YYYY-MM-DD)
+    - search: Search in notes field (icontains)
+    - sort: Sort by 'date', '-date', 'coin', '-coin', 'qty', '-qty', 'fee', '-fee'
+    - page_size: Number of results per page (default 10, max 100)
+    
+    POST /api/trades/
+    Create a new trade.
+    """
+    serializer_class = TradeSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = TradePagination
+    
+    def get_queryset(self):
+        queryset = Trade.objects.filter(user=self.request.user).select_related('coin').prefetch_related('emotions__emotion_tag')
+        
+        # Filter by coin
+        coin_filter = self.request.query_params.get('coin')
+        if coin_filter:
+            queryset = queryset.filter(
+                Q(coin__symbol__icontains=coin_filter) |
+                Q(coin__name__icontains=coin_filter)
+            )
+        
+        # Filter by trade type
+        trade_type = self.request.query_params.get('type')
+        if trade_type:
+            queryset = queryset.filter(trade_type=trade_type.lower())
+        
+        # Filter by emotion tag
+        emotion_id = self.request.query_params.get('emotion')
+        if emotion_id:
+            queryset = queryset.filter(emotions__emotion_tag_id=emotion_id).distinct()
+        
+        # Filter by date range
+        date_from = self.request.query_params.get('date_from')
+        if date_from:
+            queryset = queryset.filter(trade_date__date__gte=date_from)
+        
+        date_to = self.request.query_params.get('date_to')
+        if date_to:
+            queryset = queryset.filter(trade_date__date__lte=date_to)
+        
+        # Search in notes
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(notes__icontains=search)
+        
+        # Sorting
+        sort = self.request.query_params.get('sort', '-date')
+        if sort == 'date':
+            queryset = queryset.order_by('trade_date')
+        elif sort == '-date':
+            queryset = queryset.order_by('-trade_date')
+        elif sort == 'coin':
+            queryset = queryset.order_by('coin__symbol')
+        elif sort == '-coin':
+            queryset = queryset.order_by('-coin__symbol')
+        elif sort == 'qty':
+            queryset = queryset.order_by('quantity')
+        elif sort == '-qty':
+            queryset = queryset.order_by('-quantity')
+        elif sort == 'fee':
+            queryset = queryset.order_by('fee')
+        elif sort == '-fee':
+            queryset = queryset.order_by('-fee')
+        else:
+            queryset = queryset.order_by('-trade_date')
+        
+        # Filter by P&L (profit/loss) - done in Python after evaluation
+        pnl_filter = self.request.query_params.get('pnl')
+        if pnl_filter:
+            trades_list = []
+            for trade in queryset:
+                if trade.sell_price and trade.buy_price:
+                    realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+                    if pnl_filter == 'profit' and realized_pnl > 0:
+                        trades_list.append(trade.id)
+                    elif pnl_filter == 'loss' and realized_pnl < 0:
+                        trades_list.append(trade.id)
+            queryset = queryset.filter(id__in=trades_list)
+        
+        return queryset
+    
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class TradeDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET /api/trades/{id}/
+    Retrieve a specific trade.
+    
+    PATCH /api/trades/{id}/
+    Update a specific trade.
+    
+    DELETE /api/trades/{id}/
+    Delete a specific trade.
+    """
+    serializer_class = TradeSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        return Trade.objects.filter(user=self.request.user).select_related('coin').prefetch_related('emotions__emotion_tag')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def trade_summary(request):
+    """
+    GET /api/trades/summary/
+    Get summary statistics for trades with optional filtering.
+    
+    Query Parameters (same as TradeListCreateView):
+    - coin, type, emotion, date_from, date_to, search
+    
+    Response:
+    {
+        "total_trades": 45,
+        "closed_trades": 38,
+        "open_trades": 7,
+        "winning_trades": 22,
+        "win_rate": 57.89,
+        "total_realized_pnl": 1250.50,
+        "total_fees": 125.00
+    }
+    """
+    queryset = Trade.objects.filter(user=request.user).select_related('coin')
+    
+    # Apply same filters as TradeListCreateView
+    coin_filter = request.query_params.get('coin')
+    if coin_filter:
+        queryset = queryset.filter(
+            Q(coin__symbol__icontains=coin_filter) |
+            Q(coin__name__icontains=coin_filter)
+        )
+    
+    trade_type = request.query_params.get('type')
+    if trade_type:
+        queryset = queryset.filter(trade_type=trade_type.lower())
+    
+    emotion_id = request.query_params.get('emotion')
+    if emotion_id:
+        queryset = queryset.filter(emotions__emotion_tag_id=emotion_id).distinct()
+    
+    date_from = request.query_params.get('date_from')
+    if date_from:
+        queryset = queryset.filter(trade_date__date__gte=date_from)
+    
+    date_to = request.query_params.get('date_to')
+    if date_to:
+        queryset = queryset.filter(trade_date__date__lte=date_to)
+    
+    search = request.query_params.get('search')
+    if search:
+        queryset = queryset.filter(notes__icontains=search)
+    
+    # Calculate statistics
+    total_trades = queryset.count()
+    closed_trades = queryset.filter(sell_price__isnull=False, buy_price__isnull=False).count()
+    open_trades = queryset.filter(sell_price__isnull=True).count()
+    
+    # Calculate winning trades and total realized P&L
+    winning_trades = 0
+    total_realized_pnl = 0.0
+    total_fees = 0.0
+    
+    for trade in queryset:
+        total_fees += trade.fee
+        if trade.sell_price and trade.buy_price:
+            realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            total_realized_pnl += realized_pnl
+            if realized_pnl > 0:
+                winning_trades += 1
+    
+    win_rate = (winning_trades / closed_trades * 100) if closed_trades > 0 else 0.0
+    
+    data = {
+        'total_trades': total_trades,
+        'closed_trades': closed_trades,
+        'open_trades': open_trades,
+        'winning_trades': winning_trades,
+        'win_rate': round(win_rate, 2),
+        'total_realized_pnl': round(total_realized_pnl, 2),
+        'total_fees': round(total_fees, 2),
+    }
+    
+    serializer = TradeSummarySerializer(data)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def coin_search(request):
+    """
+    GET /api/coins/search/?q=bitcoin
+    Search for coins by symbol or name.
+    
+    First searches local database, then CoinGecko API if no results.
+    
+    Response:
+    [
+        {
+            "id": 1,
+            "coingecko_id": "bitcoin",
+            "symbol": "BTC",
+            "name": "Bitcoin"
+        }
+    ]
+    """
+    query = request.query_params.get('q')
+    if not query:
+        return Response(
+            {'error': 'Query parameter "q" is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Search local database first
+    local_coins = Coin.objects.filter(
+        Q(symbol__icontains=query) |
+        Q(name__icontains=query)
+    )[:10]
+    
+    if local_coins.exists():
+        serializer = CoinSerializer(local_coins, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    # Search CoinGecko API
+    try:
+        from django.conf import settings
+        api_key = getattr(settings, 'COINGECKO_API_KEY', '')
+        
+        headers = {}
+        if api_key:
+            headers['x-cg-demo-api-key'] = api_key
+        
+        response = requests.get(
+            'https://api.coingecko.com/api/v3/search',
+            params={'query': query},
+            headers=headers,
+            timeout=5
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        coins = data.get('coins', [])[:10]
+        
+        result = [
+            {
+                'id': None,
+                'coingecko_id': coin.get('id'),
+                'symbol': coin.get('symbol', '').upper(),
+                'name': coin.get('name', '')
+            }
+            for coin in coins
+        ]
+        
+        return Response(result, status=status.HTTP_200_OK)
+    
+    except requests.RequestException:
+        return Response(
+            {'error': 'Failed to search CoinGecko API'},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+
+
+class CoinListCreateView(generics.ListCreateAPIView):
+    """
+    GET /api/coins/
+    List all coins.
+    
+    POST /api/coins/
+    Create a new coin (or return existing if coingecko_id already exists).
+    """
+    serializer_class = CoinSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = Coin.objects.all().order_by('symbol')
+    
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new coin or return existing one if coingecko_id already exists.
+        """
+        coingecko_id = request.data.get('coingecko_id')
+        
+        if not coingecko_id:
+            return Response(
+                {'error': 'coingecko_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if coin already exists
+        existing_coin = Coin.objects.filter(coingecko_id=coingecko_id).first()
+        if existing_coin:
+            serializer = self.get_serializer(existing_coin)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        
+        # Create new coin
+        return super().create(request, *args, **kwargs)
+
+
+class EmotionTagListView(generics.ListAPIView):
+    """
+    GET /api/emotion-tags/
+    List all emotion tags.
+    """
+    serializer_class = EmotionTagSerializer
+    permission_classes = [IsAuthenticated]
+    queryset = EmotionTag.objects.all().order_by('name')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_trades_csv(request):
+    """
+    GET /api/trades/export/csv/
+    Export all trades as CSV file.
+    
+    Columns: Date, Coin, Symbol, Type, Quantity, Buy Price, Sell Price, Fee, Realized P&L, Emotions, Notes
+    """
+    trades = Trade.objects.filter(user=request.user).select_related('coin').prefetch_related('emotions__emotion_tag')
+    
+    # Create CSV response
+    response = StreamingHttpResponse(
+        content_type='text/csv',
+        headers={'Content-Disposition': 'attachment; filename="trades.csv"'}
+    )
+    
+    writer = csv.writer(response)
+    writer.writerow(['Date', 'Coin', 'Symbol', 'Type', 'Quantity', 'Buy Price', 'Sell Price', 'Fee', 'Realized P&L', 'Emotions', 'Notes'])
+    
+    for trade in trades:
+        emotions = ', '.join([et.emotion_tag.name for et in trade.emotions.all()])
+        realized_pnl = None
+        if trade.sell_price and trade.buy_price:
+            realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        
+        writer.writerow([
+            trade.trade_date.strftime('%Y-%m-%d %H:%M:%S'),
+            trade.coin.name,
+            trade.coin.symbol,
+            trade.trade_type.upper(),
+            trade.quantity,
+            trade.buy_price or '',
+            trade.sell_price or '',
+            trade.fee,
+            realized_pnl or '',
+            emotions,
+            trade.notes or ''
+        ])
+    
+    return response
