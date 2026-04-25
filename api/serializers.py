@@ -1,4 +1,4 @@
-﻿from django.contrib.auth.models import User
+from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import (
     UserProfile, UserSession, RefreshToken, Coin, EmotionTag, 
@@ -13,9 +13,86 @@ class CoinSerializer(serializers.ModelSerializer):
 
 
 class EmotionTagSerializer(serializers.ModelSerializer):
+    trade_count = serializers.SerializerMethodField()
+    win_rate = serializers.SerializerMethodField()
+    avg_pnl = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmotionTag
+        fields = ['id', 'name', 'color', 'trade_count', 'win_rate', 'avg_pnl']
+
+    def get_trade_count(self, obj):
+        """Return the number of TradeEmotion records linked to this tag"""
+        return obj.trade_emotions.count()
+
+    def get_win_rate(self, obj):
+        """Calculate win rate for closed trades with this emotion tag"""
+        trade_emotions = obj.trade_emotions.select_related('trade').all()
+        
+        closed_trades = []
+        for te in trade_emotions:
+            trade = te.trade
+            if trade.sell_price is not None and trade.buy_price is not None:
+                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+                closed_trades.append(realized_pnl)
+        
+        if not closed_trades:
+            return 0.0
+        
+        winning_count = sum(1 for pnl in closed_trades if pnl > 0)
+        win_rate = (winning_count / len(closed_trades)) * 100
+        return round(win_rate, 1)
+
+    def get_avg_pnl(self, obj):
+        """Calculate average P&L for closed trades with this emotion tag"""
+        trade_emotions = obj.trade_emotions.select_related('trade').all()
+        
+        closed_pnls = []
+        for te in trade_emotions:
+            trade = te.trade
+            if trade.sell_price is not None and trade.buy_price is not None:
+                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+                closed_pnls.append(realized_pnl)
+        
+        if not closed_pnls:
+            return 0.0
+        
+        avg = sum(closed_pnls) / len(closed_pnls)
+        return round(avg, 2)
+
+
+class EmotionTagWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmotionTag
         fields = ['id', 'name', 'color']
+
+    def validate_name(self, value):
+        """Validate name is not empty and is unique (case-insensitive)"""
+        value = value.strip()
+        
+        if not value:
+            raise serializers.ValidationError("Name cannot be empty")
+        
+        # Check for duplicate name (case-insensitive)
+        queryset = EmotionTag.objects.filter(name__iexact=value)
+        
+        # Exclude current instance when updating
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        
+        if queryset.exists():
+            raise serializers.ValidationError("An emotion tag with this name already exists")
+        
+        return value
+
+    def validate_color(self, value):
+        """Validate color is not empty"""
+        value = value.strip()
+        
+        if not value:
+            raise serializers.ValidationError("Color cannot be empty")
+        
+        return value
 
 
 class TradeEmotionSerializer(serializers.ModelSerializer):
