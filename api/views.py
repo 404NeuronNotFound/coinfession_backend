@@ -781,3 +781,102 @@ def export_trades_csv(request):
         ])
     
     return response
+
+
+# ─── Emotion Tags CRUD Views ──────────────────────────────────────
+from .serializers import EmotionTagWriteSerializer
+
+
+class EmotionTagListCreateView(generics.ListCreateAPIView):
+    """
+    GET /api/emotion-tags/
+    List all emotion tags with statistics.
+    
+    POST /api/emotion-tags/
+    Create a new emotion tag.
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = EmotionTag.objects.all().order_by('name')
+    
+    def get_serializer_class(self):
+        if self.request.method == 'POST':
+            return EmotionTagWriteSerializer
+        return EmotionTagSerializer
+    
+    def create(self, request, *args, **kwargs):
+        """Create emotion tag and return with stats"""
+        serializer = EmotionTagWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        emotion_tag = serializer.save()
+        
+        # Return with stats using EmotionTagSerializer
+        output_serializer = EmotionTagSerializer(emotion_tag)
+        return Response(output_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class EmotionTagDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET /api/emotion-tags/<id>/
+    Retrieve a single emotion tag with statistics.
+    
+    PATCH /api/emotion-tags/<id>/
+    Update an emotion tag.
+    
+    DELETE /api/emotion-tags/<id>/
+    Delete an emotion tag (CASCADE deletes TradeEmotion records).
+    """
+    permission_classes = [IsAuthenticated]
+    queryset = EmotionTag.objects.all()
+    
+    def get_serializer_class(self):
+        if self.request.method in ['PATCH', 'PUT']:
+            return EmotionTagWriteSerializer
+        return EmotionTagSerializer
+    
+    def update(self, request, *args, **kwargs):
+        """Update emotion tag and return with stats"""
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = EmotionTagWriteSerializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        emotion_tag = serializer.save()
+        
+        # Return with stats using EmotionTagSerializer
+        output_serializer = EmotionTagSerializer(emotion_tag)
+        return Response(output_serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def suggested_tags(request):
+    """
+    GET /api/emotion-tags/suggested/
+    Return hardcoded list of suggested emotion tags that don't already exist.
+    """
+    # Hardcoded suggestions
+    suggestions = [
+        {'name': 'Revenge trading', 'color': '#D85A30'},
+        {'name': 'Greedy', 'color': '#EF9F27'},
+        {'name': 'Fear of loss', 'color': '#E24B4A'},
+        {'name': 'Confident', 'color': '#1D9E75'},
+        {'name': 'Bored', 'color': '#888780'},
+        {'name': 'Excited', 'color': '#7F77DD'},
+        {'name': 'Calm', 'color': '#378ADD'},
+        {'name': 'Rushed', 'color': '#D4537E'},
+        {'name': 'Uncertain', 'color': '#A78BFA'},
+        {'name': 'Euphoric', 'color': '#F472B6'},
+    ]
+    
+    # Get existing tag names (case-insensitive)
+    existing_names = set(
+        EmotionTag.objects.values_list('name', flat=True)
+    )
+    existing_names_lower = {name.lower() for name in existing_names}
+    
+    # Filter out suggestions that already exist
+    filtered_suggestions = [
+        suggestion for suggestion in suggestions
+        if suggestion['name'].lower() not in existing_names_lower
+    ]
+    
+    return Response(filtered_suggestions, status=status.HTTP_200_OK)
