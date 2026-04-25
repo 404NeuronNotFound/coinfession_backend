@@ -17,7 +17,9 @@ from .views import (
     export_trades_csv,
     coin_search,
     CoinListCreateView,
-    EmotionTagListView,
+    EmotionTagListCreateView,
+    EmotionTagDetailView,
+    suggested_tags,
 )
 
 urlpatterns = [
@@ -42,8 +44,12 @@ urlpatterns = [
     path('trades/', TradeListCreateView.as_view(), name='trade_list_create'),
     path('trades/<int:pk>/', TradeDetailView.as_view(), name='trade_detail'),
     
-    # Coins & Emotions
+    # Coins
     path('coins/search/', coin_search, name='coin_search'),
     path('coins/', CoinListCreateView.as_view(), name='coin_list_create'),
-    path('emotion-tags/', EmotionTagListView.as_view(), name='emotion_tag_list'),
+    
+    # Emotion Tags CRUD (suggested must come before <int:pk>)
+    path('emotion-tags/suggested/', suggested_tags, name='suggested_tags'),
+    path('emotion-tags/', EmotionTagListCreateView.as_view(), name='emotion_tag_list_create'),
+    path('emotion-tags/<int:pk>/', EmotionTagDetailView.as_view(), name='emotion_tag_detail'),
 ]
