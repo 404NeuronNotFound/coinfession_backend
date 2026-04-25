@@ -740,6 +740,7 @@ class EmotionTagListView(generics.ListAPIView):
     queryset = EmotionTag.objects.all().order_by('name')
 
 
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def export_trades_csv(request):
@@ -751,11 +752,10 @@ def export_trades_csv(request):
     """
     trades = Trade.objects.filter(user=request.user).select_related('coin').prefetch_related('emotions__emotion_tag')
     
-    # Create CSV response
-    response = StreamingHttpResponse(
-        content_type='text/csv',
-        headers={'Content-Disposition': 'attachment; filename="trades.csv"'}
-    )
+    # Create CSV response using HttpResponse (not StreamingHttpResponse)
+    # because @api_view doesn't work well with StreamingHttpResponse
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="trades.csv"'
     
     writer = csv.writer(response)
     writer.writerow(['Date', 'Coin', 'Symbol', 'Type', 'Quantity', 'Buy Price', 'Sell Price', 'Fee', 'Realized P&L', 'Emotions', 'Notes'])
