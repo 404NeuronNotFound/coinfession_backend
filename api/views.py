@@ -1216,3 +1216,270 @@ def refresh_portfolio_prices(request):
     
     serializer = PortfolioResponseSerializer(response_data)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ─── Emotion Journal View ──────────────────────────────────────
+from datetime import timedelta
+from .serializers import (
+    EmotionStatSerializer, EmotionTradeSerializer, PatternInsightSerializer,
+    HeatmapDaySerializer, EmotionJournalSerializer
+)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def emotion_journal(request):
+    """
+    GET /api/emotion-journal/
+    Get emotion journal with stats, timeline, insights, and heatmap.
+    
+    Query Parameters:
+    - emotion_id: Filter timeline by emotion tag ID (optional)
+    - weeks: Heatmap lookback period in weeks (default 12, max 52)
+    """
+    user = request.user
+    
+    # Parse query parameters
+    emotion_id_filter = request.query_params.get('emotion_id')
+    weeks = int(request.query_params.get('weeks', 12))
+    weeks = min(weeks, 52)  # Cap at 52 weeks
+    
+    # ─── Step 1: Load all trades ───
+    trades = Trade.objects.filter(user=user).select_related('coin').prefetch_related(
+        'emotions__emotion_tag'
+    ).order_by('-trade_date')
+    
+    # ─── Step 2: Build emotion_stats ───
+    # Get all emotion tags that have at least one trade for this user
+    emotion_tag_ids = TradeEmotion.objects.filter(
+        trade__user=user
+    ).values_list('emotion_tag_id', flat=True).distinct()
+    
+    emotion_stats_list = []
+    
+    for emotion_tag_id in emotion_tag_ids:
+        emotion_tag = EmotionTag.objects.get(id=emotion_tag_id)
+        
+        # Get all TradeEmotion records for this emotion
+        trade_emotions = TradeEmotion.objects.filter(
+            emotion_tag_id=emotion_tag_id,
+            trade__user=user
+        ).select_related('trade')
+        
+        # Calculate stats
+        trade_count = trade_emotions.count()
+        
+        closed_pnls = []
+        closed_count = 0
+        
+        for te in trade_emotions:
+            trade = te.trade
+            if trade.sell_price is not None and trade.buy_price is not None:
+                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+                closed_pnls.append(realized_pnl)
+                closed_count += 1
+        
+        # Calculate win_rate
+        if closed_count > 0:
+            winning_count = sum(1 for pnl in closed_pnls if pnl > 0)
+            win_rate = (winning_count / closed_count) * 100
+        else:
+            win_rate = 0.0
+        
+        # Calculate avg_pnl and total_pnl
+        if closed_pnls:
+            avg_pnl = sum(closed_pnls) / len(closed_pnls)
+            total_pnl = sum(closed_pnls)
+        else:
+            avg_pnl = 0.0
+            total_pnl = 0.0
+        
+        emotion_stats_list.append({
+            'id': emotion_tag.id,
+            'name': emotion_tag.name,
+            'color': emotion_tag.color,
+            'trade_count': trade_count,
+            'closed_count': closed_count,
+            'win_rate': round(win_rate, 1),
+            'avg_pnl': round(avg_pnl, 2),
+            'total_pnl': round(total_pnl, 2),
+        })
+    
+    # Sort by trade_count descending
+    emotion_stats_list.sort(key=lambda x: x['trade_count'], reverse=True)
+    
+    # ─── Step 3: Build trades timeline ───
+    import pytz
+    user_timezone = pytz.timezone('Asia/Manila')  # Philippines timezone
+    
+    if emotion_id_filter:
+        # Filter to trades with this emotion
+        trades_timeline = []
+        for trade in trades:
+            has_emotion = any(
+                te.emotion_tag_id == int(emotion_id_filter)
+                for te in trade.emotions.all()
+            )
+            if has_emotion:
+                trades_timeline.append(trade)
+    else:
+        trades_timeline = list(trades)
+    
+    trades_data = []
+    for trade in trades_timeline:
+        # Get first emotion tag (primary)
+        emotion_tag = None
+        emotion_name = "Untagged"
+        emotion_color = "#888888"
+        emotion_id = None
+        
+        if trade.emotions.exists():
+            emotion_tag = trade.emotions.first().emotion_tag
+            emotion_name = emotion_tag.name
+            emotion_color = emotion_tag.color
+            emotion_id = emotion_tag.id
+        
+        # Calculate realized_pnl
+        realized_pnl = None
+        if trade.sell_price is not None and trade.buy_price is not None:
+            realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        
+        # Format date in user's timezone (cross-platform: remove leading zero from day)
+        from datetime import datetime
+        if isinstance(trade.trade_date, datetime):
+            if trade.trade_date.tzinfo is not None:
+                local_dt = trade.trade_date.astimezone(user_timezone)
+            else:
+                utc_dt = pytz.UTC.localize(trade.trade_date)
+                local_dt = utc_dt.astimezone(user_timezone)
+            date_str = local_dt.strftime("%b %d").lstrip("0")
+        else:
+            date_str = str(trade.trade_date)
+        
+        trades_data.append({
+            'id': trade.id,
+            'date': date_str,
+            'trade_date': trade.trade_date.isoformat(),
+            'trade_type': trade.trade_type,
+            'coin_symbol': trade.coin.symbol,
+            'coin_name': trade.coin.name,
+            'emotion_name': emotion_name,
+            'emotion_color': emotion_color,
+            'emotion_id': emotion_id,
+            'realized_pnl': round(realized_pnl, 2) if realized_pnl is not None else None,
+            'is_open': trade.sell_price is None,
+            'notes': trade.notes or "",
+        })
+    
+    # ─── Step 4: Build pattern insights ───
+    insights_data = []
+    
+    if emotion_stats_list:
+        # GOOD insight — best performing emotion
+        good_candidates = [
+            e for e in emotion_stats_list
+            if e['avg_pnl'] > 0 and e['trade_count'] >= 3
+        ]
+        if good_candidates:
+            best = max(good_candidates, key=lambda x: x['win_rate'])
+            insights_data.append({
+                'type': 'good',
+                'title': f"{best['name']} trades are your best trades",
+                'body': f"{best['win_rate']}% win rate with an average of +${best['avg_pnl']} per trade. Keep doing this.",
+            })
+        
+        # BAD insight — worst performing emotion
+        bad_candidates = [
+            e for e in emotion_stats_list
+            if e['avg_pnl'] < 0 and e['trade_count'] >= 2
+        ]
+        if bad_candidates:
+            worst = min(bad_candidates, key=lambda x: x['avg_pnl'])
+            insights_data.append({
+                'type': 'bad',
+                'title': f"{worst['name']} is destroying value",
+                'body': f"Every {worst['name']} trade averaged ${worst['avg_pnl']}. That is ${worst['total_pnl']} in total losses.",
+            })
+        
+        # WARN insight — most frequent losing emotion
+        warn_candidates = [
+            e for e in emotion_stats_list
+            if e['win_rate'] < 40
+        ]
+        if warn_candidates:
+            most_frequent = max(warn_candidates, key=lambda x: x['trade_count'])
+            insights_data.append({
+                'type': 'warn',
+                'title': f"{most_frequent['name']} entries have a {most_frequent['win_rate']}% win rate",
+                'body': f"{most_frequent['trade_count']} trades tagged {most_frequent['name']} with only {most_frequent['win_rate']}% profitable. Review your entry rules for these trades.",
+            })
+    
+    # ─── Step 5: Build heatmap (full year 2026: Jan 1 - Dec 31) ───
+    from datetime import date, datetime
+    from django.utils import timezone as django_tz
+    import pytz
+    
+    # Use Asia/Manila timezone for Philippines (UTC+8)
+    # In production, this should come from user profile
+    user_timezone = pytz.timezone('Asia/Manila')
+    
+    # Full year 2026
+    start_date = date(2026, 1, 1)
+    end_date = date(2026, 12, 31)
+    
+    # Build a map of dates to trade counts for efficiency
+    date_trade_map = {}
+    for trade in trades:
+        # Convert to user's timezone before extracting date
+        if isinstance(trade.trade_date, datetime):
+            if trade.trade_date.tzinfo is not None:
+                # Already timezone-aware, convert to user timezone
+                local_dt = trade.trade_date.astimezone(user_timezone)
+            else:
+                # Naive datetime, assume UTC
+                utc_dt = pytz.UTC.localize(trade.trade_date)
+                local_dt = utc_dt.astimezone(user_timezone)
+            trade_date = local_dt.date()
+        else:
+            trade_date = trade.trade_date
+        
+        date_key = trade_date.isoformat()
+        date_trade_map[date_key] = date_trade_map.get(date_key, 0) + 1
+    
+    heatmap_data = []
+    current_date = start_date
+    
+    while current_date <= end_date:
+        date_key = current_date.isoformat()
+        trade_count = date_trade_map.get(date_key, 0)
+        
+        # Assign intensity
+        if trade_count == 0:
+            intensity = 0
+        elif trade_count == 1:
+            intensity = 1
+        elif trade_count <= 3:
+            intensity = 2
+        elif trade_count <= 5:
+            intensity = 3
+        else:
+            intensity = 4
+        
+        heatmap_data.append({
+            'date': date_key,
+            'trade_count': trade_count,
+            'intensity': intensity,
+        })
+        
+        current_date += timedelta(days=1)
+    
+    # ─── Step 6: Return response ───
+    response_data = {
+        'emotion_stats': emotion_stats_list,
+        'trades': trades_data,
+        'insights': insights_data,
+        'heatmap': heatmap_data,
+    }
+    
+    serializer = EmotionJournalSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)
