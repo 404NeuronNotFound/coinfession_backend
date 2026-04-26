@@ -352,3 +352,54 @@ class PortfolioResponseSerializer(serializers.Serializer):
     holdings = CoinHoldingSerializer(many=True)
     prices_live = serializers.BooleanField()
     warning = serializers.CharField(allow_null=True)
+
+
+# ─── Emotion Journal Serializers ──────────────────────────────────
+class EmotionStatSerializer(serializers.Serializer):
+    """Represents one emotion tag with aggregated stats"""
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    color = serializers.CharField()
+    trade_count = serializers.IntegerField()
+    closed_count = serializers.IntegerField()
+    win_rate = serializers.FloatField()
+    avg_pnl = serializers.FloatField()
+    total_pnl = serializers.FloatField()
+
+
+class EmotionTradeSerializer(serializers.Serializer):
+    """Represents one trade in the emotion journal timeline"""
+    id = serializers.IntegerField()
+    date = serializers.CharField()
+    trade_date = serializers.CharField()
+    trade_type = serializers.CharField()
+    coin_symbol = serializers.CharField()
+    coin_name = serializers.CharField()
+    emotion_name = serializers.CharField()
+    emotion_color = serializers.CharField()
+    emotion_id = serializers.IntegerField(allow_null=True)
+    realized_pnl = serializers.FloatField(allow_null=True)
+    is_open = serializers.BooleanField()
+    notes = serializers.CharField()
+
+
+class PatternInsightSerializer(serializers.Serializer):
+    """Represents one auto-generated insight"""
+    type = serializers.CharField()
+    title = serializers.CharField()
+    body = serializers.CharField()
+
+
+class HeatmapDaySerializer(serializers.Serializer):
+    """Represents one day cell in the activity heatmap"""
+    date = serializers.CharField()
+    trade_count = serializers.IntegerField()
+    intensity = serializers.IntegerField()
+
+
+class EmotionJournalSerializer(serializers.Serializer):
+    """The full response envelope for emotion journal"""
+    emotion_stats = EmotionStatSerializer(many=True)
+    trades = EmotionTradeSerializer(many=True)
+    insights = PatternInsightSerializer(many=True)
+    heatmap = HeatmapDaySerializer(many=True)
