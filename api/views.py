@@ -592,11 +592,31 @@ def trade_summary(request):
     closed_trades = queryset.filter(sell_price__isnull=False, buy_price__isnull=False).count()
     open_trades = queryset.filter(sell_price__isnull=True).count()
     
-    # Calculate winning trades and total realized P&L
+    # Calculate winning trades, total realized P&L, and hold times
     winning_trades = 0
     total_realized_pnl = 0.0
     total_fees = 0.0
     
+    # For hold time calculation - simpler approach
+    # For SELL trades with both buy_price and sell_price, calculate hold time from trade_date
+    # This assumes each SELL trade represents a closed position
+    from datetime import datetime
+    from django.utils import timezone
+    
+    hold_times = []  # in days
+    now = timezone.now()
+    
+    # For closed trades (SELL with both prices), we can't determine exact hold time
+    # without tracking individual positions, so we'll calculate from open BUY trades
+    for trade in queryset.filter(trade_type='buy'):
+        # Calculate how long this BUY trade has been open
+        hold_days = (now - trade.trade_date).days
+        hold_times.append(hold_days)
+    
+    # Calculate average hold time
+    avg_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0.0
+    
+    # Calculate P&L and winning trades
     for trade in queryset:
         total_fees += trade.fee
         if trade.sell_price and trade.buy_price:
@@ -615,6 +635,7 @@ def trade_summary(request):
         'win_rate': round(win_rate, 2),
         'total_realized_pnl': round(total_realized_pnl, 2),
         'total_fees': round(total_fees, 2),
+        'avg_hold_time_days': round(avg_hold_time, 1),
     }
     
     serializer = TradeSummarySerializer(data)
@@ -880,3 +901,318 @@ def suggested_tags(request):
     ]
     
     return Response(filtered_suggestions, status=status.HTTP_200_OK)
+
+
+# ─── Portfolio Views ──────────────────────────────────────
+from .serializers import CoinHoldingSerializer, PortfolioSummarySerializer, PortfolioResponseSerializer
+from .models import PortfolioSnapshot
+from datetime import datetime
+from django.http import HttpResponse
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def portfolio_overview(request):
+    """
+    GET /api/portfolio/
+    Calculate and return the user's current portfolio with live prices.
+    """
+    user = request.user
+    
+    # Step 1: Calculate holdings from Trade table
+    # IMPORTANT: BUY trades represent open positions (coins you hold)
+    # SELL trades represent closed positions (realized P&L)
+    # Portfolio should only show open BUY positions
+    trades = Trade.objects.filter(user=user, trade_type='buy').select_related('coin')
+    
+    holdings_dict = {}
+    for trade in trades:
+        coin_id = trade.coin.id
+        if coin_id not in holdings_dict:
+            holdings_dict[coin_id] = {
+                'coin': trade.coin,
+                'total_quantity': 0.0,
+                'total_cost': 0.0,
+            }
+        
+        holdings_dict[coin_id]['total_quantity'] += trade.quantity
+        if trade.buy_price:
+            holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+    
+    # Calculate holdings (only positive quantities)
+    holdings = []
+    for coin_id, data in holdings_dict.items():
+        total_quantity = data['total_quantity']
+        
+        # Use epsilon comparison for floats
+        if total_quantity > 0.000001:
+            avg_buy_price = data['total_cost'] / total_quantity if total_quantity > 0 else 0.0
+            cost_basis = data['total_cost']
+            
+            holdings.append({
+                'coin': data['coin'],
+                'total_quantity': total_quantity,
+                'avg_buy_price': avg_buy_price,
+                'cost_basis': cost_basis,
+            })
+    
+    # Step 2: Fetch live prices from CoinGecko
+    prices_live = True
+    warning = None
+    
+    if holdings:
+        coingecko_ids = [h['coin'].coingecko_id for h in holdings]
+        ids_param = ','.join(coingecko_ids)
+        
+        try:
+            from django.conf import settings
+            api_key = getattr(settings, 'COINGECKO_API_KEY', '')
+            
+            headers = {}
+            if api_key:
+                headers['x-cg-demo-api-key'] = api_key
+            
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={
+                    'ids': ids_param,
+                    'vs_currencies': 'usd',
+                    'include_24hr_change': 'true'
+                },
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            price_data = response.json()
+            
+            # Step 3: Enrich holdings with live data
+            for holding in holdings:
+                coingecko_id = holding['coin'].coingecko_id
+                coin_price_data = price_data.get(coingecko_id, {})
+                
+                holding['live_price'] = coin_price_data.get('usd', 0.0)
+                holding['change_24h'] = coin_price_data.get('usd_24h_change', 0.0)
+                holding['current_value'] = holding['live_price'] * holding['total_quantity']
+                holding['unrealized_pnl'] = holding['current_value'] - holding['cost_basis']
+                holding['unrealized_pnl_pct'] = (holding['unrealized_pnl'] / holding['cost_basis'] * 100) if holding['cost_basis'] > 0 else 0.0
+        
+        except requests.RequestException as e:
+            prices_live = False
+            warning = "Could not fetch live prices from CoinGecko. Showing last known values."
+            
+            # Set default values
+            for holding in holdings:
+                holding['live_price'] = 0.0
+                holding['change_24h'] = 0.0
+                holding['current_value'] = 0.0
+                holding['unrealized_pnl'] = 0.0
+                holding['unrealized_pnl_pct'] = 0.0
+    
+    # Step 4: Calculate portfolio-level summary
+    total_value = sum(h['current_value'] for h in holdings)
+    total_cost = sum(h['cost_basis'] for h in holdings)
+    total_unrealized_pnl = total_value - total_cost
+    total_unrealized_pct = (total_unrealized_pnl / total_cost * 100) if total_cost > 0 else 0.0
+    active_positions = len(holdings)
+    last_updated = datetime.now().isoformat()
+    
+    # Step 5: Calculate allocation_pct per holding
+    for holding in holdings:
+        holding['allocation_pct'] = (holding['current_value'] / total_value * 100) if total_value > 0 else 0.0
+    
+    # Step 6: Save fresh PortfolioSnapshot for each holding
+    if prices_live:
+        try:
+            from django.utils import timezone
+            now = timezone.now()
+            
+            for holding in holdings:
+                PortfolioSnapshot.objects.update_or_create(
+                    user=user,
+                    coin=holding['coin'],
+                    defaults={
+                        'total_quantity': holding['total_quantity'],
+                        'avg_buy_price': holding['avg_buy_price'],
+                        'unrealized_pnl': holding['unrealized_pnl'],
+                        'snapshot_date': now,
+                    }
+                )
+        except Exception as e:
+            # Snapshot save failure must not prevent response
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to save portfolio snapshot: {e}")
+    
+    # Step 7: Sort holdings by current_value descending and format response
+    holdings.sort(key=lambda x: x['current_value'], reverse=True)
+    
+    holdings_data = []
+    for h in holdings:
+        holdings_data.append({
+            'coin_id': h['coin'].id,
+            'symbol': h['coin'].symbol,
+            'name': h['coin'].name,
+            'coingecko_id': h['coin'].coingecko_id,
+            'total_quantity': round(h['total_quantity'], 8),
+            'avg_buy_price': round(h['avg_buy_price'], 2),
+            'cost_basis': round(h['cost_basis'], 2),
+            'live_price': round(h['live_price'], 2),
+            'change_24h': round(h['change_24h'], 2),
+            'current_value': round(h['current_value'], 2),
+            'unrealized_pnl': round(h['unrealized_pnl'], 2),
+            'unrealized_pnl_pct': round(h['unrealized_pnl_pct'], 2),
+            'allocation_pct': round(h['allocation_pct'], 2),
+        })
+    
+    summary_data = {
+        'total_value': round(total_value, 2),
+        'total_cost': round(total_cost, 2),
+        'total_unrealized_pnl': round(total_unrealized_pnl, 2),
+        'total_unrealized_pct': round(total_unrealized_pct, 2),
+        'active_positions': active_positions,
+        'last_updated': last_updated,
+    }
+    
+    response_data = {
+        'summary': summary_data,
+        'holdings': holdings_data,
+        'prices_live': prices_live,
+        'warning': warning,
+    }
+    
+    serializer = PortfolioResponseSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def refresh_portfolio_prices(request):
+    """
+    POST /api/portfolio/refresh/
+    Refresh portfolio prices using existing snapshots (faster than full recalculation).
+    """
+    user = request.user
+    
+    # Step 1: Load existing snapshots
+    snapshots = PortfolioSnapshot.objects.filter(user=user).select_related('coin')
+    
+    if not snapshots.exists():
+        # No snapshots, fall back to full calculation
+        return portfolio_overview(request)
+    
+    holdings = []
+    for snapshot in snapshots:
+        if snapshot.total_quantity > 0.000001:
+            cost_basis = snapshot.avg_buy_price * snapshot.total_quantity
+            holdings.append({
+                'coin': snapshot.coin,
+                'total_quantity': snapshot.total_quantity,
+                'avg_buy_price': snapshot.avg_buy_price,
+                'cost_basis': cost_basis,
+            })
+    
+    # Step 2: Fetch live prices from CoinGecko
+    prices_live = True
+    warning = None
+    
+    if holdings:
+        coingecko_ids = [h['coin'].coingecko_id for h in holdings]
+        ids_param = ','.join(coingecko_ids)
+        
+        try:
+            from django.conf import settings
+            api_key = getattr(settings, 'COINGECKO_API_KEY', '')
+            
+            headers = {}
+            if api_key:
+                headers['x-cg-demo-api-key'] = api_key
+            
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={
+                    'ids': ids_param,
+                    'vs_currencies': 'usd',
+                    'include_24hr_change': 'true'
+                },
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            
+            price_data = response.json()
+            
+            # Step 3: Enrich holdings with live data
+            for holding in holdings:
+                coingecko_id = holding['coin'].coingecko_id
+                coin_price_data = price_data.get(coingecko_id, {})
+                
+                holding['live_price'] = coin_price_data.get('usd', 0.0)
+                holding['change_24h'] = coin_price_data.get('usd_24h_change', 0.0)
+                holding['current_value'] = holding['live_price'] * holding['total_quantity']
+                holding['unrealized_pnl'] = holding['current_value'] - holding['cost_basis']
+                holding['unrealized_pnl_pct'] = (holding['unrealized_pnl'] / holding['cost_basis'] * 100) if holding['cost_basis'] > 0 else 0.0
+        
+        except requests.RequestException as e:
+            prices_live = False
+            warning = "Could not fetch live prices from CoinGecko. Showing last known values."
+            
+            # Set default values
+            for holding in holdings:
+                holding['live_price'] = 0.0
+                holding['change_24h'] = 0.0
+                holding['current_value'] = 0.0
+                holding['unrealized_pnl'] = 0.0
+                holding['unrealized_pnl_pct'] = 0.0
+    
+    # Calculate portfolio-level summary
+    total_value = sum(h['current_value'] for h in holdings)
+    total_cost = sum(h['cost_basis'] for h in holdings)
+    total_unrealized_pnl = total_value - total_cost
+    total_unrealized_pct = (total_unrealized_pnl / total_cost * 100) if total_cost > 0 else 0.0
+    active_positions = len(holdings)
+    last_updated = datetime.now().isoformat()
+    
+    # Calculate allocation_pct per holding
+    for holding in holdings:
+        holding['allocation_pct'] = (holding['current_value'] / total_value * 100) if total_value > 0 else 0.0
+    
+    # Sort holdings by current_value descending and format response
+    holdings.sort(key=lambda x: x['current_value'], reverse=True)
+    
+    holdings_data = []
+    for h in holdings:
+        holdings_data.append({
+            'coin_id': h['coin'].id,
+            'symbol': h['coin'].symbol,
+            'name': h['coin'].name,
+            'coingecko_id': h['coin'].coingecko_id,
+            'total_quantity': round(h['total_quantity'], 8),
+            'avg_buy_price': round(h['avg_buy_price'], 2),
+            'cost_basis': round(h['cost_basis'], 2),
+            'live_price': round(h['live_price'], 2),
+            'change_24h': round(h['change_24h'], 2),
+            'current_value': round(h['current_value'], 2),
+            'unrealized_pnl': round(h['unrealized_pnl'], 2),
+            'unrealized_pnl_pct': round(h['unrealized_pnl_pct'], 2),
+            'allocation_pct': round(h['allocation_pct'], 2),
+        })
+    
+    summary_data = {
+        'total_value': round(total_value, 2),
+        'total_cost': round(total_cost, 2),
+        'total_unrealized_pnl': round(total_unrealized_pnl, 2),
+        'total_unrealized_pct': round(total_unrealized_pct, 2),
+        'active_positions': active_positions,
+        'last_updated': last_updated,
+    }
+    
+    response_data = {
+        'summary': summary_data,
+        'holdings': holdings_data,
+        'prices_live': prices_live,
+        'warning': warning,
+    }
+    
+    serializer = PortfolioResponseSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)

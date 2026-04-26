@@ -20,6 +20,8 @@ from .views import (
     EmotionTagListCreateView,
     EmotionTagDetailView,
     suggested_tags,
+    portfolio_overview,
+    refresh_portfolio_prices,
 )
 
 urlpatterns = [
@@ -52,4 +54,8 @@ urlpatterns = [
     path('emotion-tags/suggested/', suggested_tags, name='suggested_tags'),
     path('emotion-tags/', EmotionTagListCreateView.as_view(), name='emotion_tag_list_create'),
     path('emotion-tags/<int:pk>/', EmotionTagDetailView.as_view(), name='emotion_tag_detail'),
+    
+    # Portfolio
+    path('portfolio/', portfolio_overview, name='portfolio_overview'),
+    path('portfolio/refresh/', refresh_portfolio_prices, name='refresh_portfolio_prices'),
 ]

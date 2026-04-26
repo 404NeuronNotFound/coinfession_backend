@@ -172,6 +172,7 @@ class TradeSummarySerializer(serializers.Serializer):
     win_rate = serializers.FloatField()
     total_realized_pnl = serializers.FloatField()
     total_fees = serializers.FloatField()
+    avg_hold_time_days = serializers.FloatField()
 
 
 class UserSerializers(serializers.ModelSerializer):
@@ -315,3 +316,39 @@ class RefreshTokenSerializer(serializers.ModelSerializer):
             'revoked_at',
             'last_used',
         ]
+
+
+# ─── Portfolio Serializers ────────────────────────────────────────
+class CoinHoldingSerializer(serializers.Serializer):
+    """Represents one coin holding in the portfolio"""
+    coin_id = serializers.IntegerField()
+    symbol = serializers.CharField()
+    name = serializers.CharField()
+    coingecko_id = serializers.CharField()
+    total_quantity = serializers.FloatField()
+    avg_buy_price = serializers.FloatField()
+    cost_basis = serializers.FloatField()
+    live_price = serializers.FloatField()
+    change_24h = serializers.FloatField()
+    current_value = serializers.FloatField()
+    unrealized_pnl = serializers.FloatField()
+    unrealized_pnl_pct = serializers.FloatField()
+    allocation_pct = serializers.FloatField()
+
+
+class PortfolioSummarySerializer(serializers.Serializer):
+    """Represents the top-level portfolio metrics"""
+    total_value = serializers.FloatField()
+    total_cost = serializers.FloatField()
+    total_unrealized_pnl = serializers.FloatField()
+    total_unrealized_pct = serializers.FloatField()
+    active_positions = serializers.IntegerField()
+    last_updated = serializers.CharField()
+
+
+class PortfolioResponseSerializer(serializers.Serializer):
+    """The full response shape for the portfolio endpoint"""
+    summary = PortfolioSummarySerializer()
+    holdings = CoinHoldingSerializer(many=True)
+    prices_live = serializers.BooleanField()
+    warning = serializers.CharField(allow_null=True)
