@@ -22,6 +22,7 @@ from .views import (
     suggested_tags,
     portfolio_overview,
     refresh_portfolio_prices,
+    emotion_journal,
 )
 
 urlpatterns = [
@@ -58,4 +59,7 @@ urlpatterns = [
     # Portfolio
     path('portfolio/', portfolio_overview, name='portfolio_overview'),
     path('portfolio/refresh/', refresh_portfolio_prices, name='refresh_portfolio_prices'),
+    
+    # Emotion Journal
+    path('emotion-journal/', emotion_journal, name='emotion_journal'),
 ]
