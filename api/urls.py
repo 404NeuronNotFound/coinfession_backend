@@ -24,6 +24,8 @@ from .views import (
     refresh_portfolio_prices,
     emotion_journal,
     pnl_analysis,
+    monthly_report_list,
+    monthly_report_detail,
 )
 
 urlpatterns = [
@@ -66,4 +68,8 @@ urlpatterns = [
     
     # P&L Analysis
     path('pnl-analysis/', pnl_analysis, name='pnl_analysis'),
+    
+    # Monthly Report
+    path('monthly-reports/', monthly_report_list, name='monthly_report_list'),
+    path('monthly-reports/<int:year>/<int:month>/', monthly_report_detail, name='monthly_report_detail'),
 ]
