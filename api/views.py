@@ -1483,3 +1483,269 @@ def emotion_journal(request):
     
     serializer = EmotionJournalSerializer(response_data)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+# ─── P&L Analysis View ────────────────────────────────────────────
+from .serializers import (
+    PnlSummarySerializer, CumulativePnlPointSerializer, MonthlyPnlSerializer,
+    CoinPnlSerializer, WinLossRatioSerializer, FeeImpactSerializer,
+    TopTradeSerializer, PnlAnalysisSerializer
+)
+from collections import defaultdict
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def pnl_analysis(request):
+    """
+    GET /api/pnl-analysis/
+    Get comprehensive P&L analysis with optional filtering.
+    
+    Query Parameters:
+    - date_from: Filter trades from this date (YYYY-MM-DD)
+    - date_to: Filter trades until this date (YYYY-MM-DD)
+    - coin_id: Filter trades for a specific coin
+    
+    Response: Complete P&L analysis with summary, charts, and insights
+    """
+    user = request.user
+    
+    # ─── Step 1: Load trades ───
+    queryset = Trade.objects.filter(user=user).select_related('coin').order_by('trade_date')
+    
+    # Apply filters
+    date_from = request.query_params.get('date_from')
+    if date_from:
+        queryset = queryset.filter(trade_date__date__gte=date_from)
+    
+    date_to = request.query_params.get('date_to')
+    if date_to:
+        queryset = queryset.filter(trade_date__date__lte=date_to)
+    
+    coin_id = request.query_params.get('coin_id')
+    if coin_id:
+        queryset = queryset.filter(coin_id=coin_id)
+    
+    trades = list(queryset)
+    
+    # ─── Step 2: Separate closed vs open ───
+    closed_trades = []
+    open_trades = []
+    
+    for trade in trades:
+        if trade.sell_price is not None and trade.buy_price is not None:
+            closed_trades.append(trade)
+        else:
+            open_trades.append(trade)
+    
+    # ─── Step 3: Calculate realized_pnl for each closed trade ───
+    trade_pnls = []  # List of (trade, pnl) tuples
+    
+    for trade in closed_trades:
+        pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        pnl = round(pnl, 2)
+        trade_pnls.append((trade, pnl))
+    
+    # ─── Step 4: Build summary ───
+    total_trades = len(trades)
+    closed_count = len(closed_trades)
+    
+    winning_trades = [(t, pnl) for t, pnl in trade_pnls if pnl > 0]
+    losing_trades = [(t, pnl) for t, pnl in trade_pnls if pnl < 0]
+    breakeven_trades = [(t, pnl) for t, pnl in trade_pnls if pnl == 0]
+    
+    winning_count = len(winning_trades)
+    losing_count = len(losing_trades)
+    breakeven_count = len(breakeven_trades)
+    
+    # Calculate metrics
+    realized_pnl = sum(pnl for _, pnl in trade_pnls)
+    win_rate = (winning_count / closed_count * 100) if closed_count > 0 else 0.0
+    
+    winning_pnls = [pnl for _, pnl in winning_trades]
+    losing_pnls = [pnl for _, pnl in losing_trades]
+    
+    avg_win = (sum(winning_pnls) / len(winning_pnls)) if winning_pnls else 0.0
+    avg_loss = (sum(losing_pnls) / len(losing_pnls)) if losing_pnls else 0.0
+    
+    gross_profits = sum(winning_pnls) if winning_pnls else 0.0
+    gross_losses = abs(sum(losing_pnls)) if losing_pnls else 0.0
+    
+    if gross_losses > 0 and gross_profits > 0:
+        profit_factor = gross_profits / gross_losses
+    else:
+        profit_factor = 0.0
+    
+    summary_data = {
+        'realized_pnl': round(realized_pnl, 2),
+        'win_rate': round(win_rate, 1),
+        'avg_win': round(avg_win, 2),
+        'avg_loss': round(avg_loss, 2),
+        'profit_factor': round(profit_factor, 2),
+        'total_trades': total_trades,
+        'closed_trades': closed_count,
+        'winning_trades': winning_count,
+        'losing_trades': losing_count,
+        'breakeven_trades': breakeven_count,
+    }
+    
+    # ─── Step 5: Build cumulative_pnl series ───
+    cumulative_pnl_data = []
+    running_total = 0.0
+    
+    for trade, pnl in trade_pnls:
+        running_total += pnl
+        cumulative_pnl_data.append({
+            'date': trade.trade_date.strftime('%Y-%m-%d'),
+            'realized_pnl': round(pnl, 2),
+            'cumulative_pnl': round(running_total, 2),
+            'trade_id': trade.id,
+            'coin_symbol': trade.coin.symbol,
+            'trade_type': trade.trade_type,
+        })
+    
+    # ─── Step 6: Build monthly_pnl ───
+    MONTH_ABBREV = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    
+    monthly_map = defaultdict(float)
+    years_set = set()
+    
+    for trade, pnl in trade_pnls:
+        year = trade.trade_date.year
+        month = trade.trade_date.month
+        years_set.add(year)
+        monthly_map[(year, month)] += pnl
+    
+    # Determine if we need to show year in labels
+    multi_year = len(years_set) > 1
+    
+    monthly_pnl_data = []
+    for (year, month), pnl in sorted(monthly_map.items()):
+        if multi_year:
+            label = f"{MONTH_ABBREV[month-1]} {str(year)[-2:]}"
+        else:
+            label = MONTH_ABBREV[month-1]
+        
+        monthly_pnl_data.append({
+            'label': label,
+            'year': year,
+            'month': month,
+            'realized_pnl': round(pnl, 2),
+            'is_profit': pnl > 0,
+        })
+    
+    # ─── Step 7: Build pnl_by_coin ───
+    coin_map = defaultdict(lambda: {'pnl': 0.0, 'count': 0, 'coin': None})
+    
+    for trade, pnl in trade_pnls:
+        coin_id = trade.coin.id
+        coin_map[coin_id]['pnl'] += pnl
+        coin_map[coin_id]['count'] += 1
+        coin_map[coin_id]['coin'] = trade.coin
+    
+    pnl_by_coin_data = []
+    for coin_id, data in coin_map.items():
+        pnl_by_coin_data.append({
+            'coin_id': coin_id,
+            'symbol': data['coin'].symbol,
+            'name': data['coin'].name,
+            'realized_pnl': round(data['pnl'], 2),
+            'trade_count': data['count'],
+            'is_profit': data['pnl'] > 0,
+        })
+    
+    # Sort by absolute value of realized_pnl descending
+    pnl_by_coin_data.sort(key=lambda x: abs(x['realized_pnl']), reverse=True)
+    
+    # ─── Step 8: Build win_loss_ratio ───
+    total_closed = closed_count
+    
+    if total_closed > 0:
+        winning_pct = (winning_count / total_closed * 100)
+        losing_pct = (losing_count / total_closed * 100)
+        breakeven_pct = (breakeven_count / total_closed * 100)
+    else:
+        winning_pct = 0.0
+        losing_pct = 0.0
+        breakeven_pct = 0.0
+    
+    win_loss_ratio_data = {
+        'winning_count': winning_count,
+        'losing_count': losing_count,
+        'breakeven_count': breakeven_count,
+        'winning_pct': round(winning_pct, 1),
+        'losing_pct': round(losing_pct, 1),
+        'breakeven_pct': round(breakeven_pct, 1),
+    }
+    
+    # ─── Step 9: Build fee_impact ───
+    total_fees = sum(trade.fee for trade in closed_trades)
+    
+    if gross_profits > 0:
+        fee_impact_pct = (total_fees / gross_profits * 100)
+    else:
+        fee_impact_pct = 0.0
+    
+    fee_impact_data = {
+        'total_fees': round(total_fees, 2),
+        'gross_profits': round(gross_profits, 2),
+        'fee_impact_pct': round(fee_impact_pct, 1),
+    }
+    
+    # ─── Step 10: Build top_wins and top_losses ───
+    # Sort by pnl descending for wins
+    top_wins_list = sorted(winning_trades, key=lambda x: x[1], reverse=True)[:3]
+    
+    # Sort by pnl ascending for losses (most negative first)
+    top_losses_list = sorted(losing_trades, key=lambda x: x[1])[:3]
+    
+    top_wins_data = []
+    for trade, pnl in top_wins_list:
+        # Cross-platform date format (remove leading zero from day)
+        date_str = trade.trade_date.strftime("%b %d").lstrip("0")
+        
+        top_wins_data.append({
+            'trade_id': trade.id,
+            'trade_type': trade.trade_type,
+            'coin_symbol': trade.coin.symbol,
+            'coin_name': trade.coin.name,
+            'date': date_str,
+            'realized_pnl': round(pnl, 2),
+            'quantity': trade.quantity,
+            'buy_price': trade.buy_price,
+            'sell_price': trade.sell_price,
+        })
+    
+    top_losses_data = []
+    for trade, pnl in top_losses_list:
+        # Cross-platform date format (remove leading zero from day)
+        date_str = trade.trade_date.strftime("%b %d").lstrip("0")
+        
+        top_losses_data.append({
+            'trade_id': trade.id,
+            'trade_type': trade.trade_type,
+            'coin_symbol': trade.coin.symbol,
+            'coin_name': trade.coin.name,
+            'date': date_str,
+            'realized_pnl': round(pnl, 2),
+            'quantity': trade.quantity,
+            'buy_price': trade.buy_price,
+            'sell_price': trade.sell_price,
+        })
+    
+    # ─── Step 11: Return response ───
+    response_data = {
+        'summary': summary_data,
+        'cumulative_pnl': cumulative_pnl_data,
+        'monthly_pnl': monthly_pnl_data,
+        'pnl_by_coin': pnl_by_coin_data,
+        'win_loss_ratio': win_loss_ratio_data,
+        'fee_impact': fee_impact_data,
+        'top_wins': top_wins_data,
+        'top_losses': top_losses_data,
+    }
+    
+    serializer = PnlAnalysisSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)

@@ -23,6 +23,7 @@ from .views import (
     portfolio_overview,
     refresh_portfolio_prices,
     emotion_journal,
+    pnl_analysis,
 )
 
 urlpatterns = [
@@ -62,4 +63,7 @@ urlpatterns = [
     
     # Emotion Journal
     path('emotion-journal/', emotion_journal, name='emotion_journal'),
+    
+    # P&L Analysis
+    path('pnl-analysis/', pnl_analysis, name='pnl_analysis'),
 ]
