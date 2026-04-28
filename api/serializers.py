@@ -489,3 +489,85 @@ class PnlAnalysisSerializer(serializers.Serializer):
     fee_impact = FeeImpactSerializer()
     top_wins = TopTradeSerializer(many=True)
     top_losses = TopTradeSerializer(many=True)
+
+
+# ─── Monthly Report Serializers ───────────────────────────────────
+class MonthlyReportMetricsSerializer(serializers.Serializer):
+    """The five metric cards for the selected month"""
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+    month_label = serializers.CharField()
+    realized_pnl = serializers.FloatField()
+    win_rate = serializers.FloatField()
+    total_trades = serializers.IntegerField()
+    closed_trades = serializers.IntegerField()
+    winning_trades = serializers.IntegerField()
+    losing_trades = serializers.IntegerField()
+    total_fees = serializers.FloatField()
+    fees_pct_of_pnl = serializers.FloatField()
+    avg_pnl_per_trade = serializers.FloatField()
+
+
+class MonthTradeSerializer(serializers.Serializer):
+    """One row in the 'this month's trades' list"""
+    id = serializers.IntegerField()
+    date = serializers.CharField()
+    trade_type = serializers.CharField()
+    coin_symbol = serializers.CharField()
+    coin_name = serializers.CharField()
+    quantity = serializers.FloatField()
+    buy_price = serializers.FloatField(allow_null=True)
+    sell_price = serializers.FloatField(allow_null=True)
+    fee = serializers.FloatField()
+    realized_pnl = serializers.FloatField(allow_null=True)
+    is_open = serializers.BooleanField()
+    emotions = serializers.ListField(child=serializers.DictField())
+    notes = serializers.CharField()
+
+
+class BestWorstTradeSerializer(serializers.Serializer):
+    """The best and worst single trade of the month"""
+    best_trade = MonthTradeSerializer(allow_null=True)
+    worst_trade = MonthTradeSerializer(allow_null=True)
+
+
+class MonthCoinPnlSerializer(serializers.Serializer):
+    """One row in the P&L by coin chart"""
+    coin_id = serializers.IntegerField()
+    symbol = serializers.CharField()
+    name = serializers.CharField()
+    realized_pnl = serializers.FloatField()
+    trade_count = serializers.IntegerField()
+    is_profit = serializers.BooleanField()
+
+
+class MonthlyBarSerializer(serializers.Serializer):
+    """One bar in the monthly P&L bar chart and one row in the report history table"""
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+    month_label = serializers.CharField()
+    realized_pnl = serializers.FloatField()
+    win_rate = serializers.FloatField()
+    total_trades = serializers.IntegerField()
+    winning_trades = serializers.IntegerField()
+    is_profit = serializers.BooleanField()
+
+
+class CumulativeMonthlyPnlSerializer(serializers.Serializer):
+    """One point on the cumulative P&L line chart"""
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+    month_label = serializers.CharField()
+    monthly_pnl = serializers.FloatField()
+    cumulative_pnl = serializers.FloatField()
+
+
+class MonthlyReportResponseSerializer(serializers.Serializer):
+    """Full response envelope for one selected month"""
+    metrics = MonthlyReportMetricsSerializer()
+    trades = MonthTradeSerializer(many=True)
+    best_worst = BestWorstTradeSerializer()
+    pnl_by_coin = MonthCoinPnlSerializer(many=True)
+    monthly_bars = MonthlyBarSerializer(many=True)
+    cumulative_pnl = CumulativeMonthlyPnlSerializer(many=True)
+    available_months = serializers.ListField(child=serializers.DictField())
