@@ -1749,3 +1749,477 @@ def pnl_analysis(request):
     
     serializer = PnlAnalysisSerializer(response_data)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+# ─── Monthly Report Views ─────────────────────────────────────────
+from .serializers import (
+    MonthlyReportMetricsSerializer, MonthTradeSerializer, BestWorstTradeSerializer,
+    MonthCoinPnlSerializer, MonthlyBarSerializer, CumulativeMonthlyPnlSerializer,
+    MonthlyReportResponseSerializer
+)
+from .models import MonthlyReport
+import calendar
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def monthly_report_list(request):
+    """
+    GET /api/monthly-reports/
+    Returns the list of all months that have trade data for the current user.
+    Used to populate the month selector tabs and the report history table.
+    """
+    user = request.user
+    
+    # Step 1: Find all months with trades
+    trades = Trade.objects.filter(user=user).select_related('coin').order_by('trade_date')
+    
+    if not trades.exists():
+        return Response({
+            'available_months': [],
+            'total_months': 0
+        }, status=status.HTTP_200_OK)
+    
+    # Extract distinct (year, month) pairs
+    month_set = set()
+    for trade in trades:
+        year = trade.trade_date.year
+        month = trade.trade_date.month
+        month_set.add((year, month))
+    
+    # Sort ascending for cumulative calculation
+    months_sorted = sorted(list(month_set))
+    
+    # Step 2: For each month calculate summary
+    MONTH_ABBREV = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    
+    # Determine if we need to show year in labels
+    years_set = set(y for y, m in months_sorted)
+    multi_year = len(years_set) > 1
+    
+    month_summaries = []
+    
+    for year, month in months_sorted:
+        # Filter trades to this month
+        month_trades = [
+            t for t in trades
+            if t.trade_date.year == year and t.trade_date.month == month
+        ]
+        
+        # Calculate metrics
+        total_trades = len(month_trades)
+        
+        closed_trades = [
+            t for t in month_trades
+            if t.sell_price is not None and t.buy_price is not None
+        ]
+        
+        closed_count = len(closed_trades)
+        
+        # Calculate realized_pnl and winning_trades
+        realized_pnl = 0.0
+        winning_trades = 0
+        
+        for trade in closed_trades:
+            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            realized_pnl += pnl
+            if pnl > 0:
+                winning_trades += 1
+        
+        # Calculate win_rate
+        win_rate = (winning_trades / closed_count * 100) if closed_count > 0 else 0.0
+        
+        # Month label
+        if multi_year:
+            month_label = f"{MONTH_ABBREV[month-1]} {str(year)[-2:]}"
+        else:
+            month_label = MONTH_ABBREV[month-1]
+        
+        month_summaries.append({
+            'year': year,
+            'month': month,
+            'month_label': month_label,
+            'realized_pnl': round(realized_pnl, 2),
+            'win_rate': round(win_rate, 1),
+            'total_trades': total_trades,
+            'winning_trades': winning_trades,
+            'is_profit': realized_pnl > 0,
+        })
+    
+    # Step 3: Build cumulative P&L series
+    cumulative_total = 0.0
+    for summary in month_summaries:
+        cumulative_total += summary['realized_pnl']
+        summary['cumulative_pnl'] = round(cumulative_total, 2)
+    
+    # Step 4: Return response (descending order - newest first)
+    month_summaries.reverse()
+    
+    return Response({
+        'available_months': month_summaries,
+        'total_months': len(month_summaries)
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def monthly_report_detail(request, year, month):
+    """
+    GET /api/monthly-reports/<year>/<month>/
+    Returns all data needed to render the full monthly report page for one selected month.
+    """
+    user = request.user
+    
+    # Step 1: Validate year and month
+    if month < 1 or month > 12:
+        return Response(
+            {'error': 'Invalid month value. Must be 1-12.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Step 2: Load trades for this month
+    trades = Trade.objects.filter(
+        user=user,
+        trade_date__year=year,
+        trade_date__month=month
+    ).select_related('coin').prefetch_related('emotions__emotion_tag').order_by('trade_date')
+    
+    if not trades.exists():
+        return Response(
+            {'error': 'No trades found for this month'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Step 3: Calculate metrics
+    total_trades = trades.count()
+    
+    closed_trades = []
+    open_trades = []
+    
+    for trade in trades:
+        if trade.sell_price is not None and trade.buy_price is not None:
+            closed_trades.append(trade)
+        else:
+            open_trades.append(trade)
+    
+    closed_count = len(closed_trades)
+    
+    # Calculate P&L metrics
+    realized_pnl = 0.0
+    winning_trades = 0
+    losing_trades = 0
+    total_fees = 0.0
+    
+    trade_pnls = []  # List of (trade, pnl) tuples
+    
+    for trade in trades:
+        total_fees += trade.fee
+        
+        if trade.sell_price is not None and trade.buy_price is not None:
+            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            pnl = round(pnl, 2)
+            realized_pnl += pnl
+            trade_pnls.append((trade, pnl))
+            
+            if pnl > 0:
+                winning_trades += 1
+            elif pnl < 0:
+                losing_trades += 1
+    
+    # Calculate win_rate
+    win_rate = (winning_trades / closed_count * 100) if closed_count > 0 else 0.0
+    
+    # Calculate fees_pct_of_pnl
+    if realized_pnl != 0:
+        fees_pct_of_pnl = (total_fees / abs(realized_pnl)) * 100
+    else:
+        fees_pct_of_pnl = 0.0
+    
+    # Calculate avg_pnl_per_trade
+    avg_pnl_per_trade = (realized_pnl / closed_count) if closed_count > 0 else 0.0
+    
+    # Month label (full name)
+    month_label = f"{calendar.month_name[month]} {year}"
+    
+    metrics_data = {
+        'year': year,
+        'month': month,
+        'month_label': month_label,
+        'realized_pnl': round(realized_pnl, 2),
+        'win_rate': round(win_rate, 1),
+        'total_trades': total_trades,
+        'closed_trades': closed_count,
+        'winning_trades': winning_trades,
+        'losing_trades': losing_trades,
+        'total_fees': round(total_fees, 2),
+        'fees_pct_of_pnl': round(fees_pct_of_pnl, 1),
+        'avg_pnl_per_trade': round(avg_pnl_per_trade, 2),
+    }
+    
+    # Step 4: Build trades list
+    trades_data = []
+    
+    for trade in trades:
+        # Get emotions
+        emotions_list = []
+        for te in trade.emotions.all():
+            emotions_list.append({
+                'id': te.emotion_tag.id,
+                'name': te.emotion_tag.name,
+                'color': te.emotion_tag.color,
+            })
+        
+        # Calculate realized_pnl
+        realized_pnl_value = None
+        if trade.sell_price is not None and trade.buy_price is not None:
+            realized_pnl_value = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            realized_pnl_value = round(realized_pnl_value, 2)
+        
+        # Format date (cross-platform: remove leading zero from day)
+        date_str = trade.trade_date.strftime("%b %d").lstrip("0")
+        
+        trades_data.append({
+            'id': trade.id,
+            'date': date_str,
+            'trade_type': trade.trade_type,
+            'coin_symbol': trade.coin.symbol,
+            'coin_name': trade.coin.name,
+            'quantity': trade.quantity,
+            'buy_price': trade.buy_price,
+            'sell_price': trade.sell_price,
+            'fee': trade.fee,
+            'realized_pnl': realized_pnl_value,
+            'is_open': trade.sell_price is None,
+            'emotions': emotions_list,
+            'notes': trade.notes or "",
+        })
+    
+    # Step 5: Find best and worst trades
+    best_trade_data = None
+    worst_trade_data = None
+    
+    if trade_pnls:
+        # Best trade (highest P&L)
+        best_trade, best_pnl = max(trade_pnls, key=lambda x: x[1])
+        
+        best_emotions = []
+        for te in best_trade.emotions.all():
+            best_emotions.append({
+                'id': te.emotion_tag.id,
+                'name': te.emotion_tag.name,
+                'color': te.emotion_tag.color,
+            })
+        
+        best_date_str = best_trade.trade_date.strftime("%b %d").lstrip("0")
+        
+        best_trade_data = {
+            'id': best_trade.id,
+            'date': best_date_str,
+            'trade_type': best_trade.trade_type,
+            'coin_symbol': best_trade.coin.symbol,
+            'coin_name': best_trade.coin.name,
+            'quantity': best_trade.quantity,
+            'buy_price': best_trade.buy_price,
+            'sell_price': best_trade.sell_price,
+            'fee': best_trade.fee,
+            'realized_pnl': best_pnl,
+            'is_open': False,
+            'emotions': best_emotions,
+            'notes': best_trade.notes or "",
+        }
+        
+        # Worst trade (lowest P&L)
+        worst_trade, worst_pnl = min(trade_pnls, key=lambda x: x[1])
+        
+        worst_emotions = []
+        for te in worst_trade.emotions.all():
+            worst_emotions.append({
+                'id': te.emotion_tag.id,
+                'name': te.emotion_tag.name,
+                'color': te.emotion_tag.color,
+            })
+        
+        worst_date_str = worst_trade.trade_date.strftime("%b %d").lstrip("0")
+        
+        worst_trade_data = {
+            'id': worst_trade.id,
+            'date': worst_date_str,
+            'trade_type': worst_trade.trade_type,
+            'coin_symbol': worst_trade.coin.symbol,
+            'coin_name': worst_trade.coin.name,
+            'quantity': worst_trade.quantity,
+            'buy_price': worst_trade.buy_price,
+            'sell_price': worst_trade.sell_price,
+            'fee': worst_trade.fee,
+            'realized_pnl': worst_pnl,
+            'is_open': False,
+            'emotions': worst_emotions,
+            'notes': worst_trade.notes or "",
+        }
+    
+    best_worst_data = {
+        'best_trade': best_trade_data,
+        'worst_trade': worst_trade_data,
+    }
+    
+    # Step 6: Build pnl_by_coin
+    coin_map = defaultdict(lambda: {'pnl': 0.0, 'count': 0, 'coin': None})
+    
+    for trade, pnl in trade_pnls:
+        coin_id = trade.coin.id
+        coin_map[coin_id]['pnl'] += pnl
+        coin_map[coin_id]['count'] += 1
+        coin_map[coin_id]['coin'] = trade.coin
+    
+    pnl_by_coin_data = []
+    for coin_id, data in coin_map.items():
+        pnl_by_coin_data.append({
+            'coin_id': coin_id,
+            'symbol': data['coin'].symbol,
+            'name': data['coin'].name,
+            'realized_pnl': round(data['pnl'], 2),
+            'trade_count': data['count'],
+            'is_profit': data['pnl'] > 0,
+        })
+    
+    # Sort by absolute value of realized_pnl descending
+    pnl_by_coin_data.sort(key=lambda x: abs(x['realized_pnl']), reverse=True)
+    
+    # Step 7: Build monthly_bars (all months, not just this one)
+    all_trades = Trade.objects.filter(user=user).select_related('coin').order_by('trade_date')
+    
+    # Extract distinct (year, month) pairs
+    month_set = set()
+    for trade in all_trades:
+        y = trade.trade_date.year
+        m = trade.trade_date.month
+        month_set.add((y, m))
+    
+    # Sort ascending
+    months_sorted = sorted(list(month_set))
+    
+    MONTH_ABBREV = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    
+    # Determine if we need to show year in labels
+    years_set = set(y for y, m in months_sorted)
+    multi_year = len(years_set) > 1
+    
+    monthly_bars_data = []
+    
+    for y, m in months_sorted:
+        # Filter trades to this month
+        month_trades = [
+            t for t in all_trades
+            if t.trade_date.year == y and t.trade_date.month == m
+        ]
+        
+        # Calculate metrics
+        total_trades_month = len(month_trades)
+        
+        closed_trades_month = [
+            t for t in month_trades
+            if t.sell_price is not None and t.buy_price is not None
+        ]
+        
+        closed_count_month = len(closed_trades_month)
+        
+        # Calculate realized_pnl and winning_trades
+        realized_pnl_month = 0.0
+        winning_trades_month = 0
+        
+        for trade in closed_trades_month:
+            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            realized_pnl_month += pnl
+            if pnl > 0:
+                winning_trades_month += 1
+        
+        # Calculate win_rate
+        win_rate_month = (winning_trades_month / closed_count_month * 100) if closed_count_month > 0 else 0.0
+        
+        # Month label
+        if multi_year:
+            month_label_bar = f"{MONTH_ABBREV[m-1]} {str(y)[-2:]}"
+        else:
+            month_label_bar = MONTH_ABBREV[m-1]
+        
+        monthly_bars_data.append({
+            'year': y,
+            'month': m,
+            'month_label': month_label_bar,
+            'realized_pnl': round(realized_pnl_month, 2),
+            'win_rate': round(win_rate_month, 1),
+            'total_trades': total_trades_month,
+            'winning_trades': winning_trades_month,
+            'is_profit': realized_pnl_month > 0,
+        })
+    
+    # Step 8: Build cumulative_pnl series
+    cumulative_pnl_data = []
+    cumulative_total = 0.0
+    
+    for bar in monthly_bars_data:
+        cumulative_total += bar['realized_pnl']
+        cumulative_pnl_data.append({
+            'year': bar['year'],
+            'month': bar['month'],
+            'month_label': bar['month_label'],
+            'monthly_pnl': bar['realized_pnl'],
+            'cumulative_pnl': round(cumulative_total, 2),
+        })
+    
+    # Step 9: Save or update MonthlyReport record
+    try:
+        MonthlyReport.objects.update_or_create(
+            user=user,
+            year=year,
+            month=month,
+            defaults={
+                'total_realized_pnl': metrics_data['realized_pnl'],
+                'win_rate': metrics_data['win_rate'],
+                'total_trades': metrics_data['total_trades'],
+                'winning_trades': metrics_data['winning_trades'],
+            }
+        )
+    except Exception as e:
+        # Save failure must NOT prevent the response from being returned
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Failed to save MonthlyReport: {e}")
+    
+    # Step 10: Build available_months (same as monthly_report_list)
+    available_months_data = []
+    cumulative_total_avail = 0.0
+    
+    for bar in monthly_bars_data:
+        cumulative_total_avail += bar['realized_pnl']
+        available_months_data.append({
+            'year': bar['year'],
+            'month': bar['month'],
+            'month_label': bar['month_label'],
+            'realized_pnl': bar['realized_pnl'],
+            'win_rate': bar['win_rate'],
+            'total_trades': bar['total_trades'],
+            'winning_trades': bar['winning_trades'],
+            'is_profit': bar['is_profit'],
+            'cumulative_pnl': round(cumulative_total_avail, 2),
+        })
+    
+    # Reverse for descending order (newest first)
+    available_months_data.reverse()
+    
+    # Step 11: Return full response
+    response_data = {
+        'metrics': metrics_data,
+        'trades': trades_data,
+        'best_worst': best_worst_data,
+        'pnl_by_coin': pnl_by_coin_data,
+        'monthly_bars': monthly_bars_data,
+        'cumulative_pnl': cumulative_pnl_data,
+        'available_months': available_months_data,
+    }
+    
+    serializer = MonthlyReportResponseSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)
