@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import (
     UserProfile, UserSession, RefreshToken, Coin, EmotionTag, 
-    TradeEmotion, Trade
+    TradeEmotion, Trade, APIKey, AIFeedback
 )
 
 
@@ -571,3 +571,136 @@ class MonthlyReportResponseSerializer(serializers.Serializer):
     monthly_bars = MonthlyBarSerializer(many=True)
     cumulative_pnl = CumulativeMonthlyPnlSerializer(many=True)
     available_months = serializers.ListField(child=serializers.DictField())
+
+
+# ─── API Keys Serializers ─────────────────────────────────────────
+class APIKeyReadSerializer(serializers.ModelSerializer):
+    """
+    Used for all GET responses.
+    NEVER includes key_encrypted or the full key.
+    """
+    is_connected = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = APIKey
+        fields = ['id', 'provider', 'key_suffix', 'plan', 'last_used', 'created_at', 'is_connected']
+        read_only_fields = ['id', 'provider', 'key_suffix', 'plan', 'last_used', 'created_at']
+    
+    def get_is_connected(self, obj):
+        """Always True for existing records"""
+        return True
+
+
+class APIKeySaveSerializer(serializers.Serializer):
+    """
+    Used in POST and PATCH save/rotate responses only.
+    Returns the full key ONCE so the user can copy it.
+    """
+    id = serializers.IntegerField()
+    provider = serializers.CharField()
+    key_suffix = serializers.CharField()
+    plan = serializers.CharField()
+    created_at = serializers.DateTimeField()
+    full_key = serializers.CharField()
+    warning = serializers.CharField()
+
+
+class APIKeyWriteSerializer(serializers.Serializer):
+    """
+    Used to validate POST and PATCH request bodies.
+    """
+    provider = serializers.CharField(required=True)
+    key = serializers.CharField(required=True)
+    
+    def validate_provider(self, value):
+        """Validate provider is in allowed list"""
+        value = value.lower().strip()
+        allowed_providers = ['anthropic', 'coingecko']
+        
+        if value not in allowed_providers:
+            raise serializers.ValidationError(
+                f"Provider must be one of: {', '.join(allowed_providers)}"
+            )
+        
+        return value
+    
+    def validate_key(self, value):
+        """Validate key format based on provider"""
+        value = value.strip()
+        
+        if not value:
+            raise serializers.ValidationError("API key cannot be empty")
+        
+        return value
+    
+    def validate(self, data):
+        """Cross-field validation for provider-specific key formats"""
+        provider = data.get('provider', '').lower()
+        key = data.get('key', '')
+        
+        if provider == 'anthropic':
+            if not key.startswith('sk-ant'):
+                raise serializers.ValidationError({
+                    'key': 'Anthropic keys must start with "sk-ant"'
+                })
+        
+        elif provider == 'coingecko':
+            if not key.startswith('CG-'):
+                raise serializers.ValidationError({
+                    'key': 'CoinGecko keys must start with "CG-"'
+                })
+        
+        return data
+
+
+# ─── AI Feedback Serializers ──────────────────────────────────────
+class AIFeedbackScoresSerializer(serializers.Serializer):
+    """Scores section of AI feedback"""
+    discipline = serializers.IntegerField()
+    risk_mgmt = serializers.IntegerField()
+    consistency = serializers.IntegerField()
+
+
+class AIFeedbackSectionSerializer(serializers.Serializer):
+    """One section in whats_working or whats_hurting"""
+    title = serializers.CharField()
+    body = serializers.CharField()
+
+
+class AIFeedbackParsedSerializer(serializers.Serializer):
+    """The parsed feedback_text JSON"""
+    overall = serializers.CharField()
+    scores = AIFeedbackScoresSerializer()
+    whats_working = AIFeedbackSectionSerializer(many=True)
+    whats_hurting = AIFeedbackSectionSerializer(many=True)
+    one_thing_to_fix = serializers.CharField()
+
+
+class AIFeedbackSerializer(serializers.ModelSerializer):
+    """Full AI feedback record with parsed JSON"""
+    feedback_parsed = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = AIFeedback
+        fields = ['id', 'prompt_summary', 'feedback_parsed', 'created_at', 'month_label']
+        read_only_fields = ['id', 'created_at']
+    
+    def get_feedback_parsed(self, obj):
+        """Parse the JSON feedback_text field"""
+        import json
+        try:
+            parsed = json.loads(obj.feedback_text)
+            return AIFeedbackParsedSerializer(parsed).data
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+
+class AIFeedbackPreviewSerializer(serializers.Serializer):
+    """Preview of what will be analyzed"""
+    total_trades = serializers.IntegerField()
+    closed_trades = serializers.IntegerField()
+    winning_trades = serializers.IntegerField()
+    win_rate = serializers.FloatField()
+    realized_pnl = serializers.FloatField()
+    emotions_tagged = serializers.IntegerField()
+    has_enough_data = serializers.BooleanField()

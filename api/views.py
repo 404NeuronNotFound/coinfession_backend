@@ -2223,3 +2223,375 @@ def monthly_report_detail(request, year, month):
     
     serializer = MonthlyReportResponseSerializer(response_data)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+
+# ─── API Keys Management Views ────────────────────────────────────
+from .models import APIKey
+from .serializers import APIKeyReadSerializer, APIKeySaveSerializer, APIKeyWriteSerializer
+from .encryption import encrypt_key, decrypt_key
+import time
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def api_key_list_or_save(request):
+    """
+    GET /api/api-keys/
+    Returns all API keys for the current user.
+    
+    POST /api/api-keys/
+    Saves a new API key for the user.
+    """
+    if request.method == 'GET':
+        api_keys = APIKey.objects.filter(user=request.user).order_by('provider')
+        serializer = APIKeyReadSerializer(api_keys, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    elif request.method == 'POST':
+        # Step 1: Validate input
+        serializer = APIKeyWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        validated_data = serializer.validated_data
+        provider = validated_data['provider'].lower()
+        plain_key = validated_data['key']
+        
+        # Step 2: Detect plan
+        if provider == 'anthropic':
+            plan = 'paid'  # Anthropic has no free tier
+        elif provider == 'coingecko':
+            if plain_key.startswith('CG-demo'):
+                plan = 'demo'
+            else:
+                plan = 'pro'
+        else:
+            plan = 'unknown'
+        
+        # Step 3: Encrypt the key
+        try:
+            encrypted = encrypt_key(plain_key)
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to encrypt key: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Step 4: Delete existing key for this provider
+        APIKey.objects.filter(user=request.user, provider=provider).delete()
+        
+        # Step 5: Create new APIKey record
+        api_key = APIKey.objects.create(
+            user=request.user,
+            provider=provider,
+            key_encrypted=encrypted,
+            key_suffix=plain_key[-4:],
+            plan=plan,
+            last_used=None
+        )
+        
+        # Step 6: Return save response with full key
+        response_data = {
+            'id': api_key.id,
+            'provider': api_key.provider,
+            'key_suffix': api_key.key_suffix,
+            'plan': api_key.plan,
+            'created_at': api_key.created_at,
+            'full_key': plain_key,
+            'warning': 'Save this key now — it will not be shown again in full after this response.'
+        }
+        
+        serializer = APIKeySaveSerializer(response_data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def api_key_delete(request, provider):
+    """
+    DELETE /api/api-keys/<str:provider>/
+    Deletes the API key for the given provider.
+    """
+    provider = provider.lower()
+    
+    if provider not in ['anthropic', 'coingecko']:
+        return Response(
+            {'error': 'Provider must be "anthropic" or "coingecko"'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        api_key = APIKey.objects.get(user=request.user, provider=provider)
+        api_key.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    except APIKey.DoesNotExist:
+        return Response(
+            {'error': f'No API key found for provider: {provider}'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def api_key_ping(request):
+    """
+    POST /api/api-keys/ping/
+    Tests connectivity for a provider key.
+    
+    Body: { "provider": "anthropic" | "coingecko" }
+    """
+    provider = request.data.get('provider', '').lower()
+    
+    if provider not in ['anthropic', 'coingecko']:
+        return Response(
+            {'error': 'Provider must be "anthropic" or "coingecko"'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Load key from database
+    try:
+        api_key = APIKey.objects.get(user=request.user, provider=provider)
+    except APIKey.DoesNotExist:
+        return Response(
+            {'error': f'No API key found for provider: {provider}'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Decrypt key
+    try:
+        decrypted_key = decrypt_key(api_key.key_encrypted)
+    except Exception as e:
+        return Response(
+            {'ok': False, 'error': f'Failed to decrypt key: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+    
+    # Test connectivity based on provider
+    if provider == 'anthropic':
+        try:
+            import anthropic
+            start = time.time()
+            client = anthropic.Anthropic(api_key=decrypted_key)
+            client.models.list()
+            latency = int((time.time() - start) * 1000)
+            return Response({'ok': True, 'latency_ms': latency}, status=status.HTTP_200_OK)
+        except anthropic.AuthenticationError:
+            return Response({'ok': False, 'error': 'Invalid API key'}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'ok': False, 'error': str(e)}, status=status.HTTP_200_OK)
+    
+    elif provider == 'coingecko':
+        try:
+            start = time.time()
+            resp = requests.get(
+                "https://api.coingecko.com/api/v3/ping",
+                headers={"x-cg-demo-api-key": decrypted_key},
+                timeout=8
+            )
+            resp.raise_for_status()
+            latency = int((time.time() - start) * 1000)
+            return Response({'ok': True, 'latency_ms': latency}, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({'ok': False, 'error': str(e)}, status=status.HTTP_200_OK)
+
+
+
+# ─── AI Feedback Views ────────────────────────────────────────────
+from .models import AIFeedback
+from .serializers import AIFeedbackSerializer, AIFeedbackPreviewSerializer
+
+
+@api_view(['GET'])
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_preview(request):
+    """
+    GET /api/ai-feedback/preview/
+    Returns preview stats for AI feedback generation.
+    """
+    user = request.user
+    year = request.query_params.get('year')
+    month = request.query_params.get('month')
+    
+    # Filter trades
+    trades_query = Trade.objects.filter(user=user)
+    if year:
+        trades_query = trades_query.filter(trade_date__year=int(year))
+    if month:
+        trades_query = trades_query.filter(trade_date__month=int(month))
+    
+    trades = list(trades_query)
+    
+    # Calculate stats
+    total_trades = len(trades)
+    closed_trades = [t for t in trades if t.sell_price is not None and t.buy_price is not None]
+    closed_count = len(closed_trades)
+    
+    # Calculate P&L
+    realized_pnl = 0.0
+    winning_trades = 0
+    for trade in closed_trades:
+        pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        realized_pnl += pnl
+        if pnl > 0:
+            winning_trades += 1
+    
+    win_rate = (winning_trades / closed_count * 100) if closed_count > 0 else 0.0
+    
+    # Count emotions tagged
+    emotions_tagged = TradeEmotion.objects.filter(trade__user=user).count()
+    
+    # Check if enough data
+    has_enough_data = total_trades >= 3 and emotions_tagged >= 2
+    
+    data = {
+        'total_trades': total_trades,
+        'closed_trades': closed_count,
+        'winning_trades': winning_trades,
+        'win_rate': round(win_rate, 2),
+        'realized_pnl': round(realized_pnl, 2),
+        'emotions_tagged': emotions_tagged,
+        'has_enough_data': has_enough_data,
+    }
+    
+    serializer = AIFeedbackPreviewSerializer(data)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_generate(request):
+    """
+    POST /api/ai-feedback/generate/
+    Generates AI feedback using Anthropic API.
+    """
+    from .models import APIKey
+    from .encryption import decrypt_key
+    from django.utils import timezone
+    import json
+    
+    user = request.user
+    year = request.data.get('year')
+    month = request.data.get('month')
+    
+    # Check for Anthropic API key
+    try:
+        api_key_record = APIKey.objects.get(user=user, provider='anthropic')
+        decrypted_key = decrypt_key(api_key_record.key_encrypted)
+    except APIKey.DoesNotExist:
+        return Response(
+            {'error': 'No Anthropic API key configured. Add your key in Settings → API Keys.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+    
+    # Get trades for analysis
+    trades_query = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
+    if year:
+        trades_query = trades_query.filter(trade_date__year=int(year))
+    if month:
+        trades_query = trades_query.filter(trade_date__month=int(month))
+    
+    trades = list(trades_query.order_by('trade_date'))
+    
+    if not trades:
+        return Response(
+            {'error': 'No trades found for the specified period.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Build prompt
+    prompt_parts = []
+    prompt_parts.append(f"Analyze these {len(trades)} crypto trades and provide brutally honest feedback.")
+    prompt_parts.append("\nTrades:")
+    
+    for trade in trades[:20]:  # Limit to 20 trades for token limits
+        emotions = ', '.join([te.emotion_tag.name for te in trade.emotions.all()])
+        pnl = ""
+        if trade.sell_price and trade.buy_price:
+            pnl_val = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            pnl = f" | P&L: ${pnl_val:.2f}"
+        
+        prompt_parts.append(
+            f"- {trade.trade_date.strftime('%Y-%m-%d')}: {trade.trade_type.upper()} {trade.quantity} {trade.coin.symbol} "
+            f"@ ${trade.buy_price or 0:.2f}{pnl} | Emotions: {emotions or 'none'} | Notes: {trade.notes or 'none'}"
+        )
+    
+    prompt_summary = f"Analyze my {len(trades)} trades. Tell me what I'm doing wrong and what's working."
+    full_prompt = "\n".join(prompt_parts)
+    full_prompt += "\n\nProvide your response as JSON with this structure: {\"overall\": \"assessment\", \"scores\": {\"discipline\": 1-10, \"risk_mgmt\": 1-10, \"consistency\": 1-10}, \"whats_working\": [{\"title\": \"...\", \"body\": \"...\"}], \"whats_hurting\": [{\"title\": \"...\", \"body\": \"...\"}], \"one_thing_to_fix\": \"...\"}"
+    
+    # Call Anthropic API
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=decrypted_key)
+        
+        message = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=2000,
+            messages=[
+                {"role": "user", "content": full_prompt}
+            ]
+        )
+        
+        feedback_text = message.content[0].text
+        
+        # Update last_used
+        api_key_record.last_used = timezone.now()
+        api_key_record.save()
+        
+    except Exception as e:
+        return Response(
+            {'error': f'Anthropic API error: {str(e)}'},
+            status=status.HTTP_502_BAD_GATEWAY
+        )
+    
+    # Determine month label
+    if year and month:
+        import calendar
+        month_label = f"{calendar.month_name[int(month)]} {year}"
+    elif year:
+        month_label = f"{year}"
+    else:
+        month_label = f"{timezone.now().strftime('%B %Y')}"
+    
+    # Save feedback
+    feedback = AIFeedback.objects.create(
+        user=user,
+        prompt_summary=prompt_summary,
+        feedback_text=feedback_text,
+        month_label=month_label
+    )
+    
+    serializer = AIFeedbackSerializer(feedback)
+    return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_list(request):
+    """
+    GET /api/ai-feedback/
+    Returns all AI feedback for the current user.
+    """
+    feedbacks = AIFeedback.objects.filter(user=request.user).order_by('-created_at')
+    serializer = AIFeedbackSerializer(feedbacks, many=True)
+    return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_delete(request, pk):
+    """
+    DELETE /api/ai-feedback/<id>/
+    Deletes an AI feedback record.
+    """
+    try:
+        feedback = AIFeedback.objects.get(pk=pk, user=request.user)
+        feedback.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    except AIFeedback.DoesNotExist:
+        return Response(
+            {'error': 'Feedback not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )

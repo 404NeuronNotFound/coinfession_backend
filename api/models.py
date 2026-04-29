@@ -98,6 +98,7 @@ class AIFeedback(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='ai_feedbacks')
     prompt_summary = models.TextField()
     feedback_text = models.TextField()
+    month_label = models.CharField(max_length=50, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

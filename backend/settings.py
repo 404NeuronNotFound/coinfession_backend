@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
@@ -143,3 +144,13 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+
+# API Key Encryption
+# CRITICAL: Never change this key after first use - it will make all encrypted keys unreadable
+FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "")
+
+# CoinGecko API Key (optional)
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "")
+
+# Anthropic API Key (optional - will be replaced by user-stored keys)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
