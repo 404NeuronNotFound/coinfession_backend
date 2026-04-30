@@ -2372,3 +2372,287 @@ def ai_feedback_delete(request, pk):
             {'error': 'Feedback not found'},
             status=status.HTTP_404_NOT_FOUND
         )
+
+
+# ─── Dashboard View ───────────────────────────────────────────────
+from .serializers import (
+    DashboardMetricsSerializer, DashboardHoldingSerializer, DashboardEmotionSerializer,
+    DashboardRecentTradeSerializer, DashboardAISnippetSerializer, DashboardResponseSerializer
+)
+import json
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def dashboard_overview(request):
+    """
+    GET /api/dashboard/
+    Aggregates all dashboard data into one response.
+    """
+    user = request.user
+    
+    # ─── Step 1: Load all user trades ───
+    trades = list(
+        Trade.objects.filter(user=user)
+        .select_related('coin')
+        .prefetch_related('emotions__emotion_tag')
+        .order_by('-trade_date')
+    )
+    
+    # ─── Step 4: Calculate holdings from BUY trades only (same as Portfolio) ───
+    # Only look at BUY trades to get current holdings
+    buy_trades = Trade.objects.filter(user=user, trade_type='buy').select_related('coin')
+    
+    holdings_dict = {}
+    for trade in buy_trades:
+        coin_id = trade.coin.id
+        if coin_id not in holdings_dict:
+            holdings_dict[coin_id] = {
+                'coin': trade.coin,
+                'total_quantity': 0.0,
+                'total_cost': 0.0,
+            }
+        
+        holdings_dict[coin_id]['total_quantity'] += trade.quantity
+        if trade.buy_price:
+            holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+    
+    # Calculate holdings (only positive quantities)
+    holdings = []
+    for coin_id, data in holdings_dict.items():
+        total_quantity = data['total_quantity']
+        
+        # Use epsilon comparison for floats
+        if total_quantity > 0.000001:
+            avg_buy_price = data['total_cost'] / total_quantity if total_quantity > 0 else 0.0
+            cost_basis = data['total_cost']
+            
+            holdings.append({
+                'coin': data['coin'],
+                'held_qty': total_quantity,
+                'avg_buy': avg_buy_price,
+                'cost_basis': cost_basis,
+            })
+    
+    # ─── Step 5: Fetch live prices from CoinGecko ───
+    prices_live = True
+    warning = None
+    prices = {}
+    
+    if holdings:
+        coingecko_ids = [h['coin'].coingecko_id for h in holdings]
+        ids_param = ','.join(coingecko_ids)
+        
+        try:
+            from django.conf import settings
+            
+            # Try to get CoinGecko API key (note: APIKey model was removed, so we skip this)
+            # In production, you might want to store this in settings or environment
+            api_key = getattr(settings, 'COINGECKO_API_KEY', '')
+            
+            headers = {}
+            if api_key:
+                headers['x-cg-demo-api-key'] = api_key
+            
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={
+                    'ids': ids_param,
+                    'vs_currencies': 'usd',
+                    'include_24hr_change': 'true'
+                },
+                headers=headers,
+                timeout=8
+            )
+            response.raise_for_status()
+            prices = response.json()
+            
+        except requests.RequestException:
+            prices_live = False
+            warning = "Could not fetch live prices from CoinGecko. Showing last known values."
+            prices = {}
+    
+    # ─── Step 6: Enrich holdings with live prices ───
+    for holding in holdings:
+        coingecko_id = holding['coin'].coingecko_id
+        coin_price_data = prices.get(coingecko_id, {})
+        
+        live_price = coin_price_data.get('usd', 0.0)
+        held_qty = holding['held_qty']
+        avg_buy = holding['avg_buy']
+        
+        current_value = live_price * held_qty
+        unrealized_pnl = (live_price - avg_buy) * held_qty
+        unrealized_pnl_pct = ((live_price - avg_buy) / avg_buy * 100) if avg_buy > 0 else 0.0
+        
+        holding['live_price'] = live_price
+        holding['current_value'] = current_value
+        holding['unrealized_pnl'] = unrealized_pnl
+        holding['unrealized_pnl_pct'] = unrealized_pnl_pct
+    
+    # ─── Step 7: Calculate portfolio totals ───
+    portfolio_value = sum(h['current_value'] for h in holdings)
+    total_unrealized = sum(h['unrealized_pnl'] for h in holdings)
+    total_cost = sum(h['avg_buy'] * h['held_qty'] for h in holdings)
+    unrealized_pct = (total_unrealized / total_cost * 100) if total_cost > 0 else 0.0
+    
+    if unrealized_pct >= 0:
+        unrealized_label = f"+{unrealized_pct:.1f}% unrealized"
+    else:
+        unrealized_label = f"{unrealized_pct:.1f}% unrealized"
+    
+    # ─── Step 8: Build emotion breakdown ───
+    # Get all TradeEmotion records for user's trades
+    trade_ids = [t.id for t in trades]
+    trade_emotions = TradeEmotion.objects.filter(
+        trade_id__in=trade_ids
+    ).select_related('emotion_tag')
+    
+    # Count trades with at least one emotion
+    trades_with_emotions = set(te.trade_id for te in trade_emotions)
+    total_tagged = len(trades_with_emotions)
+    
+    # Group by emotion tag
+    emotion_map = defaultdict(int)
+    for te in trade_emotions:
+        emotion_map[te.emotion_tag.id] += 1
+    
+    emotions_data = []
+    for emotion_id, trade_count in emotion_map.items():
+        emotion_tag = EmotionTag.objects.get(id=emotion_id)
+        percentage = (trade_count / total_tagged * 100) if total_tagged > 0 else 0.0
+        
+        emotions_data.append({
+            'id': emotion_tag.id,
+            'name': emotion_tag.name,
+            'color': emotion_tag.color,
+            'trade_count': trade_count,
+            'percentage': round(percentage, 1),
+        })
+    
+    # Sort by trade_count descending
+    emotions_data.sort(key=lambda x: x['trade_count'], reverse=True)
+    
+    # ─── Step 9: Build recent trades ───
+    recent_trades_data = []
+    for trade in trades[:5]:  # First 5 (already ordered by trade_date desc)
+        # Get price based on trade type
+        price = trade.buy_price if trade.trade_type == 'buy' else trade.sell_price
+        if price is None:
+            price = 0.0
+        
+        # Get first emotion tag
+        emotion_name = None
+        emotion_color = None
+        if trade.emotions.exists():
+            first_emotion = trade.emotions.first().emotion_tag
+            emotion_name = first_emotion.name
+            emotion_color = first_emotion.color
+        
+        recent_trades_data.append({
+            'id': trade.id,
+            'trade_type': trade.trade_type,
+            'coin_symbol': trade.coin.symbol,
+            'coin_name': trade.coin.name,
+            'quantity': round(trade.quantity, 8),
+            'price': round(price, 2),
+            'trade_date': trade.trade_date.strftime('%Y-%m-%d'),
+            'emotion_name': emotion_name,
+            'emotion_color': emotion_color,
+        })
+    
+    # ─── Step 10: Get AI feedback snippet ───
+    latest_feedback = AIFeedback.objects.filter(user=user).order_by('-created_at').first()
+    
+    if latest_feedback:
+        # Try to parse feedback_text as JSON
+        try:
+            parsed = json.loads(latest_feedback.feedback_text)
+            overall = parsed.get('overall', '')
+        except (json.JSONDecodeError, ValueError):
+            # If JSON parse fails, use raw text truncated to 300 chars
+            overall = latest_feedback.feedback_text[:300]
+        
+        # Format month_label
+        month_label = latest_feedback.created_at.strftime('%B %Y')
+        
+        ai_snippet_data = {
+            'id': latest_feedback.id,
+            'overall': overall,
+            'month_label': month_label,
+            'created_at': latest_feedback.created_at.isoformat(),
+        }
+    else:
+        ai_snippet_data = {
+            'id': None,
+            'overall': None,
+            'month_label': None,
+            'created_at': None,
+        }
+    
+    # ─── Step 10.5: Calculate realized P&L and win rate from trades ───
+    closed_count = 0
+    winning_count = 0
+    realized_pnl = 0.0
+    
+    for trade in trades:
+        if trade.sell_price and trade.buy_price:
+            closed_count += 1
+            trade_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            realized_pnl += trade_pnl
+            if trade_pnl > 0:
+                winning_count += 1
+    
+    win_rate = (winning_count / closed_count * 100) if closed_count > 0 else 0.0
+    
+    # Format labels
+    winning_label = f"{winning_count} of {closed_count} profitable"
+    realized_label = f"{closed_count} closed trades"
+    
+    # ─── Step 11: Build metrics ───
+    metrics_data = {
+        'portfolio_value': round(portfolio_value, 2),
+        'realized_pnl': round(realized_pnl, 2),
+        'unrealized_pnl': round(total_unrealized, 2),
+        'unrealized_pct': round(unrealized_pct, 1),
+        'win_rate': round(win_rate, 1),
+        'winning_trades': winning_count,
+        'closed_trades': closed_count,
+        'winning_label': winning_label,
+        'unrealized_label': unrealized_label,
+        'realized_label': realized_label,
+    }
+    
+    # ─── Step 12: Build holdings data ───
+    # Sort by current_value descending
+    holdings.sort(key=lambda x: x['current_value'], reverse=True)
+    
+    holdings_data = []
+    for h in holdings:
+        holdings_data.append({
+            'coin_id': h['coin'].id,
+            'symbol': h['coin'].symbol,
+            'name': h['coin'].name,
+            'coingecko_id': h['coin'].coingecko_id,
+            'total_quantity': round(h['held_qty'], 8),
+            'avg_buy_price': round(h['avg_buy'], 2),
+            'live_price': round(h['live_price'], 2),
+            'current_value': round(h['current_value'], 2),
+            'unrealized_pnl': round(h['unrealized_pnl'], 2),
+            'unrealized_pnl_pct': round(h['unrealized_pnl_pct'], 1),
+        })
+    
+    # ─── Step 13: Return response ───
+    response_data = {
+        'metrics': metrics_data,
+        'holdings': holdings_data,
+        'emotions': emotions_data,
+        'recent_trades': recent_trades_data,
+        'ai_snippet': ai_snippet_data,
+        'prices_live': prices_live,
+        'warning': warning,
+        'last_updated': datetime.now().isoformat(),
+    }
+    
+    serializer = DashboardResponseSerializer(response_data)
+    return Response(serializer.data, status=status.HTTP_200_OK)

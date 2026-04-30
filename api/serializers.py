@@ -624,3 +624,74 @@ class AIFeedbackPreviewSerializer(serializers.Serializer):
     realized_pnl = serializers.FloatField()
     emotions_tagged = serializers.IntegerField()
     has_enough_data = serializers.BooleanField()
+
+
+# ─── Dashboard Serializers ────────────────────────────────────────
+class DashboardMetricsSerializer(serializers.Serializer):
+    """The four metric cards at the top of the dashboard"""
+    portfolio_value = serializers.FloatField()
+    realized_pnl = serializers.FloatField()
+    unrealized_pnl = serializers.FloatField()
+    unrealized_pct = serializers.FloatField()
+    win_rate = serializers.FloatField()
+    winning_trades = serializers.IntegerField()
+    closed_trades = serializers.IntegerField()
+    winning_label = serializers.CharField()
+    unrealized_label = serializers.CharField()
+    realized_label = serializers.CharField()
+
+
+class DashboardHoldingSerializer(serializers.Serializer):
+    """One row in the current holdings table"""
+    coin_id = serializers.IntegerField()
+    symbol = serializers.CharField()
+    name = serializers.CharField()
+    coingecko_id = serializers.CharField()
+    total_quantity = serializers.FloatField()
+    avg_buy_price = serializers.FloatField()
+    live_price = serializers.FloatField()
+    current_value = serializers.FloatField()
+    unrealized_pnl = serializers.FloatField()
+    unrealized_pnl_pct = serializers.FloatField()
+
+
+class DashboardEmotionSerializer(serializers.Serializer):
+    """One row in the emotion breakdown"""
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    color = serializers.CharField()
+    trade_count = serializers.IntegerField()
+    percentage = serializers.FloatField()
+
+
+class DashboardRecentTradeSerializer(serializers.Serializer):
+    """One row in the recent trades list"""
+    id = serializers.IntegerField()
+    trade_type = serializers.CharField()
+    coin_symbol = serializers.CharField()
+    coin_name = serializers.CharField()
+    quantity = serializers.FloatField()
+    price = serializers.FloatField()
+    trade_date = serializers.CharField()
+    emotion_name = serializers.CharField(allow_null=True)
+    emotion_color = serializers.CharField(allow_null=True)
+
+
+class DashboardAISnippetSerializer(serializers.Serializer):
+    """AI feedback snippet for the dashboard"""
+    id = serializers.IntegerField(allow_null=True)
+    overall = serializers.CharField(allow_null=True)
+    month_label = serializers.CharField(allow_null=True)
+    created_at = serializers.CharField(allow_null=True)
+
+
+class DashboardResponseSerializer(serializers.Serializer):
+    """The full dashboard response envelope"""
+    metrics = DashboardMetricsSerializer()
+    holdings = DashboardHoldingSerializer(many=True)
+    emotions = DashboardEmotionSerializer(many=True)
+    recent_trades = DashboardRecentTradeSerializer(many=True)
+    ai_snippet = DashboardAISnippetSerializer()
+    prices_live = serializers.BooleanField()
+    warning = serializers.CharField(allow_null=True)
+    last_updated = serializers.CharField()

@@ -30,6 +30,7 @@ from .views import (
     ai_feedback_generate,
     ai_feedback_list,
     ai_feedback_delete,
+    dashboard_overview,
 )
 
 urlpatterns = [
@@ -82,4 +83,7 @@ urlpatterns = [
     path('ai-feedback/generate/', ai_feedback_generate, name='ai_feedback_generate'),
     path('ai-feedback/', ai_feedback_list, name='ai_feedback_list'),
     path('ai-feedback/<int:pk>/', ai_feedback_delete, name='ai_feedback_delete'),
+    
+    # Dashboard
+    path('dashboard/', dashboard_overview, name='dashboard_overview'),
 ]
