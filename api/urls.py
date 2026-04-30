@@ -26,9 +26,6 @@ from .views import (
     pnl_analysis,
     monthly_report_list,
     monthly_report_detail,
-    api_key_list_or_save,
-    api_key_delete,
-    api_key_ping,
     ai_feedback_preview,
     ai_feedback_generate,
     ai_feedback_list,
@@ -79,11 +76,6 @@ urlpatterns = [
     # Monthly Report
     path('monthly-reports/', monthly_report_list, name='monthly_report_list'),
     path('monthly-reports/<int:year>/<int:month>/', monthly_report_detail, name='monthly_report_detail'),
-    
-    # API Keys (ping must come before <str:provider> to avoid capturing "ping" as provider)
-    path('api-keys/', api_key_list_or_save, name='api_key_list_or_save'),
-    path('api-keys/ping/', api_key_ping, name='api_key_ping'),
-    path('api-keys/<str:provider>/', api_key_delete, name='api_key_delete'),
     
     # AI Feedback (preview and generate must come before <int:pk>)
     path('ai-feedback/preview/', ai_feedback_preview, name='ai_feedback_preview'),

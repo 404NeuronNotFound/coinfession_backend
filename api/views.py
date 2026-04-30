@@ -2225,184 +2225,11 @@ def monthly_report_detail(request, year, month):
     return Response(serializer.data, status=status.HTTP_200_OK)
 
 
-
-# ─── API Keys Management Views ────────────────────────────────────
-from .models import APIKey
-from .serializers import APIKeyReadSerializer, APIKeySaveSerializer, APIKeyWriteSerializer
-from .encryption import encrypt_key, decrypt_key
-import time
-
-
-@api_view(['GET', 'POST'])
-@permission_classes([IsAuthenticated])
-def api_key_list_or_save(request):
-    """
-    GET /api/api-keys/
-    Returns all API keys for the current user.
-    
-    POST /api/api-keys/
-    Saves a new API key for the user.
-    """
-    if request.method == 'GET':
-        api_keys = APIKey.objects.filter(user=request.user).order_by('provider')
-        serializer = APIKeyReadSerializer(api_keys, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-    
-    elif request.method == 'POST':
-        # Step 1: Validate input
-        serializer = APIKeyWriteSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
-        validated_data = serializer.validated_data
-        provider = validated_data['provider'].lower()
-        plain_key = validated_data['key']
-        
-        # Step 2: Detect plan
-        if provider == 'anthropic':
-            plan = 'paid'  # Anthropic has no free tier
-        elif provider == 'coingecko':
-            if plain_key.startswith('CG-demo'):
-                plan = 'demo'
-            else:
-                plan = 'pro'
-        else:
-            plan = 'unknown'
-        
-        # Step 3: Encrypt the key
-        try:
-            encrypted = encrypt_key(plain_key)
-        except Exception as e:
-            return Response(
-                {'error': f'Failed to encrypt key: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # Step 4: Delete existing key for this provider
-        APIKey.objects.filter(user=request.user, provider=provider).delete()
-        
-        # Step 5: Create new APIKey record
-        api_key = APIKey.objects.create(
-            user=request.user,
-            provider=provider,
-            key_encrypted=encrypted,
-            key_suffix=plain_key[-4:],
-            plan=plan,
-            last_used=None
-        )
-        
-        # Step 6: Return save response with full key
-        response_data = {
-            'id': api_key.id,
-            'provider': api_key.provider,
-            'key_suffix': api_key.key_suffix,
-            'plan': api_key.plan,
-            'created_at': api_key.created_at,
-            'full_key': plain_key,
-            'warning': 'Save this key now — it will not be shown again in full after this response.'
-        }
-        
-        serializer = APIKeySaveSerializer(response_data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-
-
-@api_view(['DELETE'])
-@permission_classes([IsAuthenticated])
-def api_key_delete(request, provider):
-    """
-    DELETE /api/api-keys/<str:provider>/
-    Deletes the API key for the given provider.
-    """
-    provider = provider.lower()
-    
-    if provider not in ['anthropic', 'coingecko']:
-        return Response(
-            {'error': 'Provider must be "anthropic" or "coingecko"'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    try:
-        api_key = APIKey.objects.get(user=request.user, provider=provider)
-        api_key.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-    except APIKey.DoesNotExist:
-        return Response(
-            {'error': f'No API key found for provider: {provider}'},
-            status=status.HTTP_404_NOT_FOUND
-        )
-
-
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def api_key_ping(request):
-    """
-    POST /api/api-keys/ping/
-    Tests connectivity for a provider key.
-    
-    Body: { "provider": "anthropic" | "coingecko" }
-    """
-    provider = request.data.get('provider', '').lower()
-    
-    if provider not in ['anthropic', 'coingecko']:
-        return Response(
-            {'error': 'Provider must be "anthropic" or "coingecko"'},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # Load key from database
-    try:
-        api_key = APIKey.objects.get(user=request.user, provider=provider)
-    except APIKey.DoesNotExist:
-        return Response(
-            {'error': f'No API key found for provider: {provider}'},
-            status=status.HTTP_404_NOT_FOUND
-        )
-    
-    # Decrypt key
-    try:
-        decrypted_key = decrypt_key(api_key.key_encrypted)
-    except Exception as e:
-        return Response(
-            {'ok': False, 'error': f'Failed to decrypt key: {str(e)}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-    
-    # Test connectivity based on provider
-    if provider == 'anthropic':
-        try:
-            import anthropic
-            start = time.time()
-            client = anthropic.Anthropic(api_key=decrypted_key)
-            client.models.list()
-            latency = int((time.time() - start) * 1000)
-            return Response({'ok': True, 'latency_ms': latency}, status=status.HTTP_200_OK)
-        except anthropic.AuthenticationError:
-            return Response({'ok': False, 'error': 'Invalid API key'}, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({'ok': False, 'error': str(e)}, status=status.HTTP_200_OK)
-    
-    elif provider == 'coingecko':
-        try:
-            start = time.time()
-            resp = requests.get(
-                "https://api.coingecko.com/api/v3/ping",
-                headers={"x-cg-demo-api-key": decrypted_key},
-                timeout=8
-            )
-            resp.raise_for_status()
-            latency = int((time.time() - start) * 1000)
-            return Response({'ok': True, 'latency_ms': latency}, status=status.HTTP_200_OK)
-        except Exception as e:
-            return Response({'ok': False, 'error': str(e)}, status=status.HTTP_200_OK)
-
-
-
 # ─── AI Feedback Views ────────────────────────────────────────────
 from .models import AIFeedback
 from .serializers import AIFeedbackSerializer, AIFeedbackPreviewSerializer
 
 
-@api_view(['GET'])
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def ai_feedback_preview(request):
@@ -2464,26 +2291,15 @@ def ai_feedback_preview(request):
 def ai_feedback_generate(request):
     """
     POST /api/ai-feedback/generate/
-    Generates AI feedback using Anthropic API.
+    Generates AI feedback using built-in rule-based analyzer.
     """
-    from .models import APIKey
-    from .encryption import decrypt_key
+    from .ai_analyzer import TradingAnalyzer
     from django.utils import timezone
-    import json
+    import calendar
     
     user = request.user
     year = request.data.get('year')
     month = request.data.get('month')
-    
-    # Check for Anthropic API key
-    try:
-        api_key_record = APIKey.objects.get(user=user, provider='anthropic')
-        decrypted_key = decrypt_key(api_key_record.key_encrypted)
-    except APIKey.DoesNotExist:
-        return Response(
-            {'error': 'No Anthropic API key configured. Add your key in Settings → API Keys.'},
-            status=status.HTTP_503_SERVICE_UNAVAILABLE
-        )
     
     # Get trades for analysis
     trades_query = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
@@ -2500,60 +2316,21 @@ def ai_feedback_generate(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Build prompt
-    prompt_parts = []
-    prompt_parts.append(f"Analyze these {len(trades)} crypto trades and provide brutally honest feedback.")
-    prompt_parts.append("\nTrades:")
-    
-    for trade in trades[:20]:  # Limit to 20 trades for token limits
-        emotions = ', '.join([te.emotion_tag.name for te in trade.emotions.all()])
-        pnl = ""
-        if trade.sell_price and trade.buy_price:
-            pnl_val = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
-            pnl = f" | P&L: ${pnl_val:.2f}"
-        
-        prompt_parts.append(
-            f"- {trade.trade_date.strftime('%Y-%m-%d')}: {trade.trade_type.upper()} {trade.quantity} {trade.coin.symbol} "
-            f"@ ${trade.buy_price or 0:.2f}{pnl} | Emotions: {emotions or 'none'} | Notes: {trade.notes or 'none'}"
-        )
-    
-    prompt_summary = f"Analyze my {len(trades)} trades. Tell me what I'm doing wrong and what's working."
-    full_prompt = "\n".join(prompt_parts)
-    full_prompt += "\n\nProvide your response as JSON with this structure: {\"overall\": \"assessment\", \"scores\": {\"discipline\": 1-10, \"risk_mgmt\": 1-10, \"consistency\": 1-10}, \"whats_working\": [{\"title\": \"...\", \"body\": \"...\"}], \"whats_hurting\": [{\"title\": \"...\", \"body\": \"...\"}], \"one_thing_to_fix\": \"...\"}"
-    
-    # Call Anthropic API
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=decrypted_key)
-        
-        message = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=2000,
-            messages=[
-                {"role": "user", "content": full_prompt}
-            ]
-        )
-        
-        feedback_text = message.content[0].text
-        
-        # Update last_used
-        api_key_record.last_used = timezone.now()
-        api_key_record.save()
-        
-    except Exception as e:
-        return Response(
-            {'error': f'Anthropic API error: {str(e)}'},
-            status=status.HTTP_502_BAD_GATEWAY
-        )
+    # Analyze trades using built-in analyzer
+    analyzer = TradingAnalyzer(trades)
+    feedback_text = analyzer.generate_feedback()
     
     # Determine month label
     if year and month:
-        import calendar
         month_label = f"{calendar.month_name[int(month)]} {year}"
     elif year:
         month_label = f"{year}"
     else:
         month_label = f"{timezone.now().strftime('%B %Y')}"
+    
+    # Create prompt summary
+    closed_count = len([t for t in trades if t.sell_price and t.buy_price])
+    prompt_summary = f"Analyzed {len(trades)} trades ({closed_count} closed) for {month_label}"
     
     # Save feedback
     feedback = AIFeedback.objects.create(

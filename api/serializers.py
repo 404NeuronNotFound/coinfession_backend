@@ -2,7 +2,7 @@ from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import (
     UserProfile, UserSession, RefreshToken, Coin, EmotionTag, 
-    TradeEmotion, Trade, APIKey, AIFeedback
+    TradeEmotion, Trade, AIFeedback
 )
 
 
@@ -571,86 +571,6 @@ class MonthlyReportResponseSerializer(serializers.Serializer):
     monthly_bars = MonthlyBarSerializer(many=True)
     cumulative_pnl = CumulativeMonthlyPnlSerializer(many=True)
     available_months = serializers.ListField(child=serializers.DictField())
-
-
-# ─── API Keys Serializers ─────────────────────────────────────────
-class APIKeyReadSerializer(serializers.ModelSerializer):
-    """
-    Used for all GET responses.
-    NEVER includes key_encrypted or the full key.
-    """
-    is_connected = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = APIKey
-        fields = ['id', 'provider', 'key_suffix', 'plan', 'last_used', 'created_at', 'is_connected']
-        read_only_fields = ['id', 'provider', 'key_suffix', 'plan', 'last_used', 'created_at']
-    
-    def get_is_connected(self, obj):
-        """Always True for existing records"""
-        return True
-
-
-class APIKeySaveSerializer(serializers.Serializer):
-    """
-    Used in POST and PATCH save/rotate responses only.
-    Returns the full key ONCE so the user can copy it.
-    """
-    id = serializers.IntegerField()
-    provider = serializers.CharField()
-    key_suffix = serializers.CharField()
-    plan = serializers.CharField()
-    created_at = serializers.DateTimeField()
-    full_key = serializers.CharField()
-    warning = serializers.CharField()
-
-
-class APIKeyWriteSerializer(serializers.Serializer):
-    """
-    Used to validate POST and PATCH request bodies.
-    """
-    provider = serializers.CharField(required=True)
-    key = serializers.CharField(required=True)
-    
-    def validate_provider(self, value):
-        """Validate provider is in allowed list"""
-        value = value.lower().strip()
-        allowed_providers = ['anthropic', 'coingecko']
-        
-        if value not in allowed_providers:
-            raise serializers.ValidationError(
-                f"Provider must be one of: {', '.join(allowed_providers)}"
-            )
-        
-        return value
-    
-    def validate_key(self, value):
-        """Validate key format based on provider"""
-        value = value.strip()
-        
-        if not value:
-            raise serializers.ValidationError("API key cannot be empty")
-        
-        return value
-    
-    def validate(self, data):
-        """Cross-field validation for provider-specific key formats"""
-        provider = data.get('provider', '').lower()
-        key = data.get('key', '')
-        
-        if provider == 'anthropic':
-            if not key.startswith('sk-ant'):
-                raise serializers.ValidationError({
-                    'key': 'Anthropic keys must start with "sk-ant"'
-                })
-        
-        elif provider == 'coingecko':
-            if not key.startswith('CG-'):
-                raise serializers.ValidationError({
-                    'key': 'CoinGecko keys must start with "CG-"'
-                })
-        
-        return data
 
 
 # ─── AI Feedback Serializers ──────────────────────────────────────
