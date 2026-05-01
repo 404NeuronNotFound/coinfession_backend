@@ -2662,3 +2662,252 @@ def dashboard_overview(request):
     
     serializer = DashboardResponseSerializer(response_data)
     return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ─── Danger Zone Views ────────────────────────────────────────────
+from .models import PortfolioSnapshot, MonthlyReport
+from .serializers import DangerZoneStatusSerializer, ConfirmDeleteSerializer, AccountDeleteSerializer
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def danger_zone_status(request):
+    """
+    GET /api/danger-zone/status/
+    Returns counts of all user data for display in the frontend before any destructive action.
+    
+    Response:
+    {
+        "trade_count": 39,
+        "snapshot_count": 5,
+        "report_count": 4,
+        "ai_feedback_count": 3,
+        "trade_emotion_count": 27
+    }
+    """
+    try:
+        counts = {
+            'trade_count': Trade.objects.filter(user=request.user).count(),
+            'snapshot_count': PortfolioSnapshot.objects.filter(user=request.user).count(),
+            'report_count': MonthlyReport.objects.filter(user=request.user).count(),
+            'ai_feedback_count': AIFeedback.objects.filter(user=request.user).count(),
+            'trade_emotion_count': TradeEmotion.objects.filter(trade__user=request.user).count(),
+        }
+        serializer = DangerZoneStatusSerializer(counts)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to retrieve danger zone status: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def reset_portfolio_snapshots(request):
+    """
+    DELETE /api/danger-zone/reset-snapshots/
+    Delete all PortfolioSnapshot records for this user.
+    They will be recalculated on next portfolio visit.
+    
+    Response:
+    {
+        "message": "Portfolio snapshots cleared. They will recalculate on your next Portfolio visit.",
+        "deleted_count": 5
+    }
+    """
+    try:
+        deleted_count, _ = PortfolioSnapshot.objects.filter(user=request.user).delete()
+        return Response(
+            {
+                'message': 'Portfolio snapshots cleared. They will recalculate on your next Portfolio visit.',
+                'deleted_count': deleted_count
+            },
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to reset portfolio snapshots: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def clear_report_cache(request):
+    """
+    DELETE /api/danger-zone/clear-reports/
+    Delete all MonthlyReport records for this user.
+    They will be recalculated from raw Trade data on demand.
+    
+    Response:
+    {
+        "message": "Monthly report cache cleared. Reports will recalculate from your trade data on demand.",
+        "deleted_count": 4
+    }
+    """
+    try:
+        deleted_count, _ = MonthlyReport.objects.filter(user=request.user).delete()
+        return Response(
+            {
+                'message': 'Monthly report cache cleared. Reports will recalculate from your trade data on demand.',
+                'deleted_count': deleted_count
+            },
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to clear report cache: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_ai_feedback_all(request):
+    """
+    DELETE /api/danger-zone/delete-ai-feedback/
+    Delete all AIFeedback records for this user.
+    
+    Request body:
+    { "confirmation": "DELETE" }
+    
+    Response:
+    {
+        "message": "All AI feedback deleted. You can regenerate it at any time.",
+        "deleted_count": 3
+    }
+    
+    Response 400:
+    { "error": "Type DELETE to confirm." }
+    """
+    try:
+        # Validate confirmation
+        confirmation = request.data.get('confirmation', '').strip()
+        if confirmation != 'DELETE':
+            return Response(
+                {'error': 'Type DELETE to confirm.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Delete AI feedback
+        deleted_count, _ = AIFeedback.objects.filter(user=request.user).delete()
+        
+        return Response(
+            {
+                'message': 'All AI feedback deleted. You can regenerate it at any time.',
+                'deleted_count': deleted_count
+            },
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to delete AI feedback: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_all_trades(request):
+    """
+    DELETE /api/danger-zone/delete-trades/
+    Delete all Trade records for this user.
+    This CASCADE deletes all TradeEmotion records too.
+    Also deletes all PortfolioSnapshot records for this user.
+    
+    Request body:
+    { "confirmation": "DELETE ALL" }
+    
+    Response:
+    {
+        "message": "All trades and portfolio snapshots deleted. Your journal has been reset.",
+        "trades_deleted": 39,
+        "snapshots_deleted": 5
+    }
+    
+    Response 400:
+    { "error": "Type DELETE ALL to confirm." }
+    """
+    try:
+        # Validate confirmation
+        confirmation = request.data.get('confirmation', '').strip()
+        if confirmation != 'DELETE ALL':
+            return Response(
+                {'error': 'Type DELETE ALL to confirm.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Delete trades (CASCADE deletes TradeEmotions)
+        trade_deleted, _ = Trade.objects.filter(user=request.user).delete()
+        
+        # Also delete snapshots (derived from trades)
+        snapshot_deleted, _ = PortfolioSnapshot.objects.filter(user=request.user).delete()
+        
+        return Response(
+            {
+                'message': 'All trades and portfolio snapshots deleted. Your journal has been reset.',
+                'trades_deleted': trade_deleted,
+                'snapshots_deleted': snapshot_deleted
+            },
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to delete trades: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_account(request):
+    """
+    DELETE /api/danger-zone/delete-account/
+    Permanently delete the entire account and all associated data.
+    
+    Request body:
+    { "username": "juandelacruz" }
+    
+    Response:
+    {
+        "message": "Account 'juandelacruz' and all associated data have been permanently deleted."
+    }
+    
+    Response 400:
+    { "error": "Username does not match your account. Type your exact username to confirm." }
+    """
+    try:
+        # Validate username matches current user
+        username = request.data.get('username', '').strip()
+        if username != request.user.username:
+            return Response(
+                {'error': 'Username does not match your account. Type your exact username to confirm.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Try to blacklist current JWT token if token_blacklist is installed
+        try:
+            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+            tokens = OutstandingToken.objects.filter(user=request.user)
+            for token in tokens:
+                BlacklistedToken.objects.get_or_create(token=token)
+        except Exception:
+            # Token blacklist may not be installed, that is OK
+            pass
+        
+        # Store username for response before deletion
+        username_for_response = request.user.username
+        
+        # Delete the user (CASCADE deletes everything linked to the user)
+        request.user.delete()
+        
+        return Response(
+            {'message': f"Account '{username_for_response}' and all associated data have been permanently deleted."},
+            status=status.HTTP_200_OK
+        )
+    except Exception as e:
+        return Response(
+            {'error': f'Failed to delete account: {str(e)}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )

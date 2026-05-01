@@ -695,3 +695,23 @@ class DashboardResponseSerializer(serializers.Serializer):
     prices_live = serializers.BooleanField()
     warning = serializers.CharField(allow_null=True)
     last_updated = serializers.CharField()
+
+
+# ─── Danger Zone Serializers ──────────────────────────────────────
+class DangerZoneStatusSerializer(serializers.Serializer):
+    """Returns counts of what will be deleted"""
+    trade_count = serializers.IntegerField()
+    snapshot_count = serializers.IntegerField()
+    report_count = serializers.IntegerField()
+    ai_feedback_count = serializers.IntegerField()
+    trade_emotion_count = serializers.IntegerField()
+
+
+class ConfirmDeleteSerializer(serializers.Serializer):
+    """Validates typed confirmation from the frontend"""
+    confirmation = serializers.CharField(required=True)
+
+
+class AccountDeleteSerializer(serializers.Serializer):
+    """Validates account deletion request"""
+    username = serializers.CharField(required=True)

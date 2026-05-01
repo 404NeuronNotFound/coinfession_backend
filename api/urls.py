@@ -31,6 +31,12 @@ from .views import (
     ai_feedback_list,
     ai_feedback_delete,
     dashboard_overview,
+    danger_zone_status,
+    reset_portfolio_snapshots,
+    clear_report_cache,
+    delete_ai_feedback_all,
+    delete_all_trades,
+    delete_account,
 )
 
 urlpatterns = [
@@ -86,4 +92,12 @@ urlpatterns = [
     
     # Dashboard
     path('dashboard/', dashboard_overview, name='dashboard_overview'),
+    
+    # Danger Zone
+    path('danger-zone/status/', danger_zone_status, name='danger_zone_status'),
+    path('danger-zone/reset-snapshots/', reset_portfolio_snapshots, name='reset_portfolio_snapshots'),
+    path('danger-zone/clear-reports/', clear_report_cache, name='clear_report_cache'),
+    path('danger-zone/delete-ai-feedback/', delete_ai_feedback_all, name='delete_ai_feedback_all'),
+    path('danger-zone/delete-trades/', delete_all_trades, name='delete_all_trades'),
+    path('danger-zone/delete-account/', delete_account, name='delete_account'),
 ]
