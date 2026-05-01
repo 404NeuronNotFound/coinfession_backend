@@ -830,7 +830,7 @@ class EmotionTagListCreateView(generics.ListCreateAPIView):
     
     def create(self, request, *args, **kwargs):
         """Create emotion tag for current user and return with stats"""
-        serializer = EmotionTagWriteSerializer(data=request.data)
+        serializer = EmotionTagWriteSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
         emotion_tag = serializer.save(user=request.user)
         
@@ -864,7 +864,7 @@ class EmotionTagDetailView(generics.RetrieveUpdateDestroyAPIView):
         """Update emotion tag and return with stats"""
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
-        serializer = EmotionTagWriteSerializer(instance, data=request.data, partial=partial)
+        serializer = EmotionTagWriteSerializer(instance, data=request.data, partial=partial, context={'request': request})
         serializer.is_valid(raise_exception=True)
         emotion_tag = serializer.save()
         

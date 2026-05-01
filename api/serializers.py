@@ -67,14 +67,15 @@ class EmotionTagWriteSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'color']
 
     def validate_name(self, value):
-        """Validate name is not empty and is unique (case-insensitive)"""
+        """Validate name is not empty and is unique per user (case-insensitive)"""
         value = value.strip()
         
         if not value:
             raise serializers.ValidationError("Name cannot be empty")
         
-        # Check for duplicate name (case-insensitive)
-        queryset = EmotionTag.objects.filter(name__iexact=value)
+        # Check for duplicate name within current user only (case-insensitive)
+        user = self.context['request'].user
+        queryset = EmotionTag.objects.filter(name__iexact=value, user=user)
         
         # Exclude current instance when updating
         if self.instance:
@@ -111,7 +112,7 @@ class TradeSerializer(serializers.ModelSerializer):
     emotion_tag_ids = serializers.ListField(
         child=serializers.IntegerField(),
         write_only=True,
-        required=False
+        required=True
     )
     realized_pnl = serializers.SerializerMethodField()
     is_open = serializers.SerializerMethodField()
