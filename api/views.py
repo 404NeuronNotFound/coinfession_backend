@@ -754,11 +754,13 @@ class CoinListCreateView(generics.ListCreateAPIView):
 class EmotionTagListView(generics.ListAPIView):
     """
     GET /api/emotion-tags/
-    List all emotion tags.
+    List all emotion tags for the current user.
     """
     serializer_class = EmotionTagSerializer
     permission_classes = [IsAuthenticated]
-    queryset = EmotionTag.objects.all().order_by('name')
+    
+    def get_queryset(self):
+        return EmotionTag.objects.filter(user=self.request.user).order_by('name')
 
 
 
@@ -811,13 +813,15 @@ from .serializers import EmotionTagWriteSerializer
 class EmotionTagListCreateView(generics.ListCreateAPIView):
     """
     GET /api/emotion-tags/
-    List all emotion tags with statistics.
+    List all emotion tags for the current user with statistics.
     
     POST /api/emotion-tags/
-    Create a new emotion tag.
+    Create a new emotion tag for the current user.
     """
     permission_classes = [IsAuthenticated]
-    queryset = EmotionTag.objects.all().order_by('name')
+    
+    def get_queryset(self):
+        return EmotionTag.objects.filter(user=self.request.user).order_by('name')
     
     def get_serializer_class(self):
         if self.request.method == 'POST':
@@ -825,10 +829,10 @@ class EmotionTagListCreateView(generics.ListCreateAPIView):
         return EmotionTagSerializer
     
     def create(self, request, *args, **kwargs):
-        """Create emotion tag and return with stats"""
+        """Create emotion tag for current user and return with stats"""
         serializer = EmotionTagWriteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        emotion_tag = serializer.save()
+        emotion_tag = serializer.save(user=request.user)
         
         # Return with stats using EmotionTagSerializer
         output_serializer = EmotionTagSerializer(emotion_tag)
@@ -847,7 +851,9 @@ class EmotionTagDetailView(generics.RetrieveUpdateDestroyAPIView):
     Delete an emotion tag (CASCADE deletes TradeEmotion records).
     """
     permission_classes = [IsAuthenticated]
-    queryset = EmotionTag.objects.all()
+    
+    def get_queryset(self):
+        return EmotionTag.objects.filter(user=self.request.user)
     
     def get_serializer_class(self):
         if self.request.method in ['PATCH', 'PUT']:
@@ -872,7 +878,7 @@ class EmotionTagDetailView(generics.RetrieveUpdateDestroyAPIView):
 def suggested_tags(request):
     """
     GET /api/emotion-tags/suggested/
-    Return hardcoded list of suggested emotion tags that don't already exist.
+    Return hardcoded list of suggested emotion tags that don't already exist for the current user.
     """
     # Hardcoded suggestions
     suggestions = [
@@ -888,9 +894,9 @@ def suggested_tags(request):
         {'name': 'Euphoric', 'color': '#F472B6'},
     ]
     
-    # Get existing tag names (case-insensitive)
+    # Get existing tag names for current user (case-insensitive)
     existing_names = set(
-        EmotionTag.objects.values_list('name', flat=True)
+        EmotionTag.objects.filter(user=request.user).values_list('name', flat=True)
     )
     existing_names_lower = {name.lower() for name in existing_names}
     

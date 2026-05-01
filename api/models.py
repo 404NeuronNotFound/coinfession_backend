@@ -39,7 +39,8 @@ class Trade(models.Model):
 
 
 class EmotionTag(models.Model):
-    name = models.CharField(max_length=50, unique=True)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='emotion_tags', null=True, blank=True)
+    name = models.CharField(max_length=50)
     color = models.CharField(max_length=20)
 
     def __str__(self):
@@ -47,6 +48,7 @@ class EmotionTag(models.Model):
 
     class Meta:
         db_table = 'emotion_tag'
+        unique_together = ('user', 'name')
 
 
 class TradeEmotion(models.Model):
