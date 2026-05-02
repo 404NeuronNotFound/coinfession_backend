@@ -74,15 +74,17 @@ class EmotionTagWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Name cannot be empty")
         
         # Check for duplicate name within current user only (case-insensitive)
-        user = self.context['request'].user
-        queryset = EmotionTag.objects.filter(name__iexact=value, user=user)
-        
-        # Exclude current instance when updating
-        if self.instance:
-            queryset = queryset.exclude(pk=self.instance.pk)
-        
-        if queryset.exists():
-            raise serializers.ValidationError("An emotion tag with this name already exists")
+        # Handle case where context might not have request (e.g., in tests)
+        if 'request' in self.context:
+            user = self.context['request'].user
+            queryset = EmotionTag.objects.filter(name__iexact=value, user=user)
+            
+            # Exclude current instance when updating
+            if self.instance:
+                queryset = queryset.exclude(pk=self.instance.pk)
+            
+            if queryset.exists():
+                raise serializers.ValidationError("An emotion tag with this name already exists")
         
         return value
 
