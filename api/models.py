@@ -19,6 +19,12 @@ class Trade(models.Model):
         ('buy', 'Buy'),
         ('sell', 'Sell'),
     ]
+    
+    POSITION_TYPE_CHOICES = [
+        ('spot', 'Spot'),
+        ('long', 'Long'),
+        ('short', 'Short'),
+    ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='trades')
     coin = models.ForeignKey(Coin, on_delete=models.CASCADE, related_name='trades')
@@ -30,12 +36,34 @@ class Trade(models.Model):
     trade_date = models.DateTimeField()
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    
+    # Long/Short fields
+    position_type = models.CharField(max_length=10, choices=POSITION_TYPE_CHOICES, default='spot')
+    leverage = models.FloatField(default=1.0)
+    entry_price = models.FloatField(null=True, blank=True)
+    exit_price = models.FloatField(null=True, blank=True)
+    collateral = models.FloatField(null=True, blank=True)
+    liquidation_price = models.FloatField(null=True, blank=True)
+    funding_fees = models.FloatField(default=0.0)
+    is_open = models.BooleanField(default=False)
+    close_date = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.trade_type.upper()} {self.quantity} {self.coin.symbol} by {self.user.username}"
 
     class Meta:
         db_table = 'trade'
+
+
+class FundingFeeLog(models.Model):
+    trade = models.ForeignKey(Trade, on_delete=models.CASCADE, related_name='funding_logs')
+    fee_amount = models.FloatField()
+    fee_rate = models.FloatField()
+    timestamp = models.DateTimeField()
+
+    class Meta:
+        db_table = 'funding_fee_log'
+        ordering = ['-timestamp']
 
 
 class EmotionTag(models.Model):
@@ -141,7 +169,7 @@ class DataTransferLog(models.Model):
     type        = models.CharField(max_length=10, choices=TYPE_CHOICES)
     filename    = models.CharField(max_length=255)
     result      = models.TextField()
-    status      = models.CharField(max_length=10)  # 'ok', 'error'
+    status      = models.CharField(max_length=10)
     created_at  = models.DateTimeField(auto_now_add=True)
 
 
@@ -207,8 +235,8 @@ class RefreshToken(models.Model):
     session = models.ForeignKey(UserSession, on_delete=models.CASCADE, related_name='tokens', null=True, blank=True)
     
     # Token Information
-    token_hash = models.CharField(max_length=255, unique=True)  # SHA256 hash of token
-    token_suffix = models.CharField(max_length=10)  # Last 10 chars for display
+    token_hash = models.CharField(max_length=255, unique=True)
+    token_suffix = models.CharField(max_length=10)
     
     # Token Lifecycle
     created_at = models.DateTimeField(auto_now_add=True)

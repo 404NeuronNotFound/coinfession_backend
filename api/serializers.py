@@ -1,8 +1,12 @@
-from django.contrib.auth.models import User
+﻿from django.contrib.auth.models import User
 from rest_framework import serializers
 from .models import (
     UserProfile, UserSession, RefreshToken, Coin, EmotionTag, 
-    TradeEmotion, Trade, AIFeedback
+    TradeEmotion, Trade, AIFeedback, FundingFeeLog
+)
+from .trade_utils import (
+    calculate_pnl, calculate_liquidation_price, 
+    calculate_quantity_from_collateral
 )
 
 
@@ -32,9 +36,9 @@ class EmotionTagSerializer(serializers.ModelSerializer):
         closed_trades = []
         for te in trade_emotions:
             trade = te.trade
-            if trade.sell_price is not None and trade.buy_price is not None:
-                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
-                closed_trades.append(realized_pnl)
+            pnl_result = calculate_pnl(trade)
+            if pnl_result is not None:
+                closed_trades.append(pnl_result['realized_pnl'])
         
         if not closed_trades:
             return 0.0
@@ -50,9 +54,9 @@ class EmotionTagSerializer(serializers.ModelSerializer):
         closed_pnls = []
         for te in trade_emotions:
             trade = te.trade
-            if trade.sell_price is not None and trade.buy_price is not None:
-                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
-                closed_pnls.append(realized_pnl)
+            pnl_result = calculate_pnl(trade)
+            if pnl_result is not None:
+                closed_pnls.append(pnl_result['realized_pnl'])
         
         if not closed_pnls:
             return 0.0
@@ -117,30 +121,160 @@ class TradeSerializer(serializers.ModelSerializer):
         required=True
     )
     realized_pnl = serializers.SerializerMethodField()
-    is_open = serializers.SerializerMethodField()
+    roi = serializers.SerializerMethodField()
 
     class Meta:
         model = Trade
         fields = [
             'id', 'coin', 'coin_id', 'trade_type', 'quantity',
             'buy_price', 'sell_price', 'fee', 'trade_date', 'notes',
-            'emotions', 'emotion_tag_ids', 'realized_pnl', 'is_open',
-            'created_at'
+            'emotions', 'emotion_tag_ids', 'realized_pnl', 'roi',
+            'created_at',
+            # Long/Short fields
+            'position_type', 'leverage', 'entry_price', 'exit_price',
+            'collateral', 'liquidation_price', 'funding_fees',
+            'is_open', 'close_date'
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'liquidation_price']
 
     def get_realized_pnl(self, obj):
-        if obj.sell_price is None or obj.buy_price is None:
-            return None
-        return (obj.sell_price - obj.buy_price) * obj.quantity - obj.fee
+        pnl_result = calculate_pnl(obj)
+        return pnl_result['realized_pnl'] if pnl_result else None
 
-    def get_is_open(self, obj):
-        return obj.sell_price is None
+    def get_roi(self, obj):
+        pnl_result = calculate_pnl(obj)
+        return pnl_result['roi'] if pnl_result else None
+
+    def validate(self, data):
+        """Validate trade data based on position type"""
+        position_type = data.get('position_type', 'spot')
+        
+        # SPOT validation
+        if position_type == 'spot':
+            # Require buy_price OR entry_price
+            buy_price = data.get('buy_price')
+            entry_price = data.get('entry_price')
+            if buy_price is None and entry_price is None:
+                raise serializers.ValidationError({
+                    'buy_price': 'Either buy_price or entry_price is required for spot trades'
+                })
+            
+            # Force leverage to 1.0 for spot
+            data['leverage'] = 1.0
+            
+            # Force is_open to False for spot
+            data['is_open'] = False
+        
+        # LONG/SHORT validation
+        elif position_type in ['long', 'short']:
+            # Require entry_price
+            entry_price = data.get('entry_price')
+            if entry_price is None or entry_price <= 0:
+                raise serializers.ValidationError({
+                    'entry_price': 'Entry price is required and must be greater than 0 for long/short trades'
+                })
+            
+            # Require collateral
+            collateral = data.get('collateral')
+            if collateral is None or collateral <= 0:
+                raise serializers.ValidationError({
+                    'collateral': 'Collateral is required and must be greater than 0 for long/short trades'
+                })
+            
+            # Require leverage
+            leverage = data.get('leverage')
+            if leverage is None:
+                raise serializers.ValidationError({
+                    'leverage': 'Leverage is required for long/short trades'
+                })
+            
+            # Validate leverage range
+            if leverage < 1.0 or leverage > 125.0:
+                raise serializers.ValidationError({
+                    'leverage': 'Leverage must be between 1.0 and 125.0'
+                })
+            
+            # Check if position is closed
+            exit_price = data.get('exit_price')
+            is_open = data.get('is_open', True)
+            
+            if not is_open and exit_price is None:
+                raise serializers.ValidationError({
+                    'exit_price': 'Exit price is required when is_open is False'
+                })
+            
+            if is_open and exit_price is not None:
+                raise serializers.ValidationError({
+                    'exit_price': 'Exit price must be None when is_open is True'
+                })
+        
+        return data
 
     def create(self, validated_data):
+        """Create trade with proper long/short handling"""
         emotion_tag_ids = validated_data.pop('emotion_tag_ids', [])
+        position_type = validated_data.get('position_type', 'spot')
+        
+        # Handle backward compatibility: if trade_type is provided but position_type is not
+        if 'trade_type' in validated_data and position_type == 'spot':
+            # Map old buy_price/sell_price to entry_price/exit_price if not provided
+            if 'entry_price' not in validated_data and 'buy_price' in validated_data:
+                validated_data['entry_price'] = validated_data['buy_price']
+            if 'exit_price' not in validated_data and 'sell_price' in validated_data:
+                validated_data['exit_price'] = validated_data['sell_price']
+        
+        # LONG/SHORT: Auto-calculate quantity from collateral
+        if position_type in ['long', 'short']:
+            collateral = validated_data.get('collateral')
+            leverage = validated_data.get('leverage')
+            entry_price = validated_data.get('entry_price')
+            
+            # Recalculate quantity server-side (ignore client value)
+            validated_data['quantity'] = calculate_quantity_from_collateral(
+                collateral, leverage, entry_price
+            )
+            
+            # Calculate liquidation price
+            validated_data['liquidation_price'] = calculate_liquidation_price(
+                entry_price, leverage, position_type
+            )
+            
+            # Set is_open based on exit_price
+            if validated_data.get('exit_price') is not None:
+                validated_data['is_open'] = False
+                # Set close_date if not provided
+                if 'close_date' not in validated_data or validated_data['close_date'] is None:
+                    from django.utils import timezone
+                    validated_data['close_date'] = timezone.now()
+            else:
+                validated_data['is_open'] = True
+                validated_data['close_date'] = None
+        
+        # SPOT: Set defaults and copy prices for backward compatibility
+        elif position_type == 'spot':
+            validated_data['is_open'] = False
+            validated_data['leverage'] = 1.0
+            validated_data['liquidation_price'] = None
+            
+            # Copy entry_price to buy_price for backward compatibility
+            if 'entry_price' in validated_data and validated_data['entry_price'] is not None:
+                validated_data['buy_price'] = validated_data['entry_price']
+            
+            # Copy exit_price to sell_price for backward compatibility
+            if 'exit_price' in validated_data and validated_data['exit_price'] is not None:
+                validated_data['sell_price'] = validated_data['exit_price']
+            
+            # Calculate collateral if not provided
+            if 'collateral' not in validated_data or validated_data['collateral'] is None:
+                entry_price = validated_data.get('entry_price') or validated_data.get('buy_price')
+                quantity = validated_data.get('quantity', 0)
+                if entry_price and quantity:
+                    validated_data['collateral'] = entry_price * quantity
+        
+        # Create trade
         trade = Trade.objects.create(**validated_data)
         
+        # Create emotion links
         for emotion_tag_id in emotion_tag_ids:
             TradeEmotion.objects.create(
                 trade=trade,
@@ -150,12 +284,65 @@ class TradeSerializer(serializers.ModelSerializer):
         return trade
 
     def update(self, instance, validated_data):
+        """Update trade with proper long/short handling"""
         emotion_tag_ids = validated_data.pop('emotion_tag_ids', None)
+        position_type = validated_data.get('position_type', instance.position_type)
         
+        # LONG/SHORT: Auto-calculate quantity from collateral if relevant fields changed
+        if position_type in ['long', 'short']:
+            collateral = validated_data.get('collateral', instance.collateral)
+            leverage = validated_data.get('leverage', instance.leverage)
+            entry_price = validated_data.get('entry_price', instance.entry_price)
+            
+            # Recalculate quantity if any of these changed
+            if ('collateral' in validated_data or 'leverage' in validated_data or 
+                'entry_price' in validated_data):
+                validated_data['quantity'] = calculate_quantity_from_collateral(
+                    collateral, leverage, entry_price
+                )
+            
+            # Recalculate liquidation price if entry_price or leverage changed
+            if 'entry_price' in validated_data or 'leverage' in validated_data:
+                validated_data['liquidation_price'] = calculate_liquidation_price(
+                    entry_price, leverage, position_type
+                )
+            
+            # Update is_open based on exit_price
+            if 'exit_price' in validated_data:
+                if validated_data['exit_price'] is not None:
+                    validated_data['is_open'] = False
+                    # Set close_date if not already set
+                    if instance.close_date is None:
+                        from django.utils import timezone
+                        validated_data['close_date'] = timezone.now()
+                else:
+                    validated_data['is_open'] = True
+                    validated_data['close_date'] = None
+        
+        # SPOT: Maintain backward compatibility
+        elif position_type == 'spot':
+            validated_data['is_open'] = False
+            validated_data['leverage'] = 1.0
+            validated_data['liquidation_price'] = None
+            
+            # Sync entry_price with buy_price
+            if 'entry_price' in validated_data:
+                validated_data['buy_price'] = validated_data['entry_price']
+            if 'buy_price' in validated_data:
+                validated_data['entry_price'] = validated_data['buy_price']
+            
+            # Sync exit_price with sell_price
+            if 'exit_price' in validated_data:
+                validated_data['sell_price'] = validated_data['exit_price']
+            if 'sell_price' in validated_data:
+                validated_data['exit_price'] = validated_data['sell_price']
+        
+        # Update trade fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
         
+        # Update emotions if provided
         if emotion_tag_ids is not None:
             instance.emotions.all().delete()
             for emotion_tag_id in emotion_tag_ids:
@@ -165,6 +352,15 @@ class TradeSerializer(serializers.ModelSerializer):
                 )
         
         return instance
+
+
+class FundingFeeLogSerializer(serializers.ModelSerializer):
+    trade_id = serializers.IntegerField(write_only=True, source='trade.id')
+    
+    class Meta:
+        model = FundingFeeLog
+        fields = ['id', 'trade_id', 'fee_amount', 'fee_rate', 'timestamp']
+        read_only_fields = ['id']
 
 
 class TradeSummarySerializer(serializers.Serializer):

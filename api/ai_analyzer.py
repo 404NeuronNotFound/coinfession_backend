@@ -395,7 +395,7 @@ class TradingAnalyzer:
             })
         
         # Overtrading
-        if self.stats.get('trades_per_day', 0) > 3:
+        if self.stats.get('trades_per_day', 0) > 3: 
             weaknesses.append({
                 'title': "You're Overtrading",
                 'body': f"You're averaging {self.stats['trades_per_day']:.1f} trades per day. That's too many. Quality over quantity. Wait for A+ setups only."

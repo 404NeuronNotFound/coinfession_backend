@@ -2911,3 +2911,174 @@ def delete_account(request):
             {'error': f'Failed to delete account: {str(e)}'},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+
+# ─── Long/Short Trading Views ─────────────────────────────────────
+from .serializers import FundingFeeLogSerializer
+from .trade_utils import calculate_unrealized_pnl, calculate_distance_to_liquidation
+from .models import FundingFeeLog
+from django.db.models import F
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def open_positions(request):
+    """
+    GET /api/trades/open-positions/
+    Get all open long/short positions with unrealized P&L and liquidation distance.
+    
+    Response:
+    [
+        {
+            "id": 1,
+            "coin": {...},
+            "position_type": "long",
+            "leverage": 5.0,
+            "entry_price": 50000.0,
+            "quantity": 0.1,
+            "collateral": 1000.0,
+            "liquidation_price": 40000.0,
+            "funding_fees": 5.0,
+            "trade_date": "2024-04-20T10:30:00Z",
+            "current_price": 52000.0,
+            "unrealized_pnl": 195.0,
+            "unrealized_roi": 19.5,
+            "distance_to_liquidation": 23.08,
+            "notes": "..."
+        }
+    ]
+    """
+    # Get all open long/short positions
+    open_trades = Trade.objects.filter(
+        user=request.user,
+        is_open=True,
+        position_type__in=['long', 'short']
+    ).select_related('coin').prefetch_related('emotions__emotion_tag')
+    
+    # Get current prices from CoinGecko
+    from django.conf import settings
+    import requests
+    
+    coingecko_ids = [trade.coin.coingecko_id for trade in open_trades if trade.coin.coingecko_id]
+    current_prices = {}
+    
+    if coingecko_ids:
+        try:
+            api_key = getattr(settings, 'COINGECKO_API_KEY', '')
+            headers = {}
+            if api_key:
+                headers['x-cg-demo-api-key'] = api_key
+            
+            response = requests.get(
+                'https://api.coingecko.com/api/v3/simple/price',
+                params={
+                    'ids': ','.join(coingecko_ids),
+                    'vs_currencies': 'usd'
+                },
+                headers=headers,
+                timeout=5
+            )
+            response.raise_for_status()
+            price_data = response.json()
+            
+            for coingecko_id, data in price_data.items():
+                current_prices[coingecko_id] = data.get('usd')
+        except requests.RequestException:
+            # If CoinGecko fails, use entry prices as fallback
+            pass
+    
+    # Build response with unrealized P&L
+    result = []
+    for trade in open_trades:
+        current_price = current_prices.get(trade.coin.coingecko_id, trade.entry_price)
+        
+        # Calculate unrealized P&L
+        unrealized_data = calculate_unrealized_pnl(trade, current_price)
+        
+        # Calculate distance to liquidation
+        distance = calculate_distance_to_liquidation(
+            current_price,
+            trade.liquidation_price,
+            trade.position_type
+        )
+        
+        # Serialize trade
+        trade_data = TradeSerializer(trade).data
+        
+        # Add extra fields
+        trade_data['current_price'] = current_price
+        if unrealized_data:
+            trade_data['unrealized_pnl'] = unrealized_data['unrealized_pnl']
+            trade_data['unrealized_roi'] = unrealized_data['unrealized_roi']
+        else:
+            trade_data['unrealized_pnl'] = None
+            trade_data['unrealized_roi'] = None
+        
+        trade_data['distance_to_liquidation'] = distance
+        
+        result.append(trade_data)
+    
+    return Response(result, status=status.HTTP_200_OK)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def funding_fee_log_views(request, trade_pk):
+    """
+    GET /api/trades/<trade_pk>/funding-fees/
+    List all funding fee logs for a specific trade.
+    
+    POST /api/trades/<trade_pk>/funding-fees/
+    Create a new funding fee log and update the trade's total funding_fees.
+    
+    Request body (POST):
+    {
+        "fee_amount": 2.5,
+        "fee_rate": 0.01
+    }
+    
+    Response (POST):
+    {
+        "id": 1,
+        "trade_id": 1,
+        "fee_amount": 2.5,
+        "fee_rate": 0.01,
+        "timestamp": "2024-04-20T10:30:00Z"
+    }
+    """
+    # Verify trade exists and belongs to user
+    try:
+        trade = Trade.objects.get(pk=trade_pk, user=request.user)
+    except Trade.DoesNotExist:
+        return Response(
+            {'error': 'Trade not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    if request.method == 'GET':
+        # List all funding fee logs for this trade
+        logs = FundingFeeLog.objects.filter(trade=trade).order_by('-timestamp')
+        serializer = FundingFeeLogSerializer(logs, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    elif request.method == 'POST':
+        # Create new funding fee log
+        data = request.data.copy()
+        data['trade_id'] = trade_pk
+        
+        serializer = FundingFeeLogSerializer(data=data)
+        if serializer.is_valid():
+            # Create the log
+            log = serializer.save(trade=trade)
+            
+            # Update trade's total funding_fees using F() expression (atomic)
+            Trade.objects.filter(pk=trade_pk).update(
+                funding_fees=F('funding_fees') + log.fee_amount
+            )
+            
+            # Refresh trade to get updated value
+            trade.refresh_from_db()
+            
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

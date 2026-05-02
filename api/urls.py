@@ -37,6 +37,8 @@ from .views import (
     delete_ai_feedback_all,
     delete_all_trades,
     delete_account,
+    open_positions,
+    funding_fee_log_views,
 )
 
 urlpatterns = [
@@ -58,7 +60,9 @@ urlpatterns = [
     # Trade Log (must come before trades/<int:pk>/)
     path('trades/summary/', trade_summary, name='trade_summary'),
     path('trades/export/csv/', export_trades_csv, name='export_trades_csv'),
+    path('trades/open-positions/', open_positions, name='open_positions'),
     path('trades/', TradeListCreateView.as_view(), name='trade_list_create'),
+    path('trades/<int:trade_pk>/funding-fees/', funding_fee_log_views, name='funding_fee_log_views'),
     path('trades/<int:pk>/', TradeDetailView.as_view(), name='trade_detail'),
     
     # Coins
