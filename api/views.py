@@ -426,6 +426,7 @@ class TradeListCreateView(generics.ListCreateAPIView):
     List all trades for the authenticated user with filtering and pagination.
     
     Query Parameters:
+    - position_type: Filter by position type ('spot', 'long', 'short') - supports comma-separated values
     - coin: Filter by coin symbol or name (icontains)
     - type: Filter by trade type ('buy' or 'sell')
     - emotion: Filter by emotion tag ID
@@ -445,6 +446,13 @@ class TradeListCreateView(generics.ListCreateAPIView):
     
     def get_queryset(self):
         queryset = Trade.objects.filter(user=self.request.user).select_related('coin').prefetch_related('emotions__emotion_tag')
+        
+        # Filter by position type (spot, long, short)
+        position_type = self.request.query_params.get('position_type')
+        if position_type:
+            # Support comma-separated values like "long,short"
+            position_types = [pt.strip() for pt in position_type.split(',')]
+            queryset = queryset.filter(position_type__in=position_types)
         
         # Filter by coin
         coin_filter = self.request.query_params.get('coin')
