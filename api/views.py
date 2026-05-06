@@ -549,7 +549,7 @@ class TradeDetailView(generics.RetrieveUpdateDestroyAPIView):
 def trade_summary(request):
     """
     GET /api/trades/summary/
-    Get summary statistics for trades with optional filtering.
+    Get summary statistics for SPOT trades only with optional filtering.
     
     Query Parameters (same as TradeListCreateView):
     - coin, type, emotion, date_from, date_to, search
@@ -565,7 +565,11 @@ def trade_summary(request):
         "total_fees": 125.00
     }
     """
-    queryset = Trade.objects.filter(user=request.user).select_related('coin')
+    # IMPORTANT: Only include SPOT trades (not leverage trades)
+    queryset = Trade.objects.filter(
+        user=request.user,
+        position_type='spot'
+    ).select_related('coin')
     
     # Apply same filters as TradeListCreateView
     coin_filter = request.query_params.get('coin')
@@ -595,7 +599,7 @@ def trade_summary(request):
     if search:
         queryset = queryset.filter(notes__icontains=search)
     
-    # Calculate statistics
+    # Calculate statistics for SPOT trades
     total_trades = queryset.count()
     closed_trades = queryset.filter(sell_price__isnull=False, buy_price__isnull=False).count()
     open_trades = queryset.filter(sell_price__isnull=True).count()
@@ -605,26 +609,22 @@ def trade_summary(request):
     total_realized_pnl = 0.0
     total_fees = 0.0
     
-    # For hold time calculation - simpler approach
-    # For SELL trades with both buy_price and sell_price, calculate hold time from trade_date
-    # This assumes each SELL trade represents a closed position
+    # For hold time calculation
     from datetime import datetime
     from django.utils import timezone
     
     hold_times = []  # in days
     now = timezone.now()
     
-    # For closed trades (SELL with both prices), we can't determine exact hold time
-    # without tracking individual positions, so we'll calculate from open BUY trades
-    for trade in queryset.filter(trade_type='buy'):
-        # Calculate how long this BUY trade has been open
+    # For open BUY trades, calculate how long they've been held
+    for trade in queryset.filter(trade_type='buy', sell_price__isnull=True):
         hold_days = (now - trade.trade_date).days
         hold_times.append(hold_days)
     
     # Calculate average hold time
     avg_hold_time = sum(hold_times) / len(hold_times) if hold_times else 0.0
     
-    # Calculate P&L and winning trades
+    # Calculate P&L and winning trades for closed SPOT trades
     for trade in queryset:
         total_fees += trade.fee
         if trade.sell_price and trade.buy_price:
@@ -2467,24 +2467,15 @@ def dashboard_overview(request):
                 'cost_basis': total_cost,
             })
     
-    # ─── Step 4B: Get open LEVERAGE positions ───
-    leverage_positions = Trade.objects.filter(
-        user=user,
-        position_type__in=['long', 'short'],
-        is_open=True
-    ).select_related('coin')
-    
     # ─── Step 5: Fetch live prices from CoinGecko ───
     prices_live = True
     warning = None
     prices = {}
     
-    # Collect all unique coins from both spot and leverage
+    # Collect all unique coins from spot holdings only
     all_coins = set()
     for h in spot_holdings:
         all_coins.add(h['coin'].coingecko_id)
-    for pos in leverage_positions:
-        all_coins.add(pos.coin.coingecko_id)
     
     if all_coins:
         ids_param = ','.join(all_coins)
@@ -2515,9 +2506,9 @@ def dashboard_overview(request):
             warning = "Could not fetch live prices from CoinGecko. Showing last known values."
             prices = {}
     
-    # ─── Step 6A: Enrich SPOT holdings with live prices ───
-    spot_portfolio_value = 0.0
-    spot_unrealized_pnl = 0.0
+    # ─── Step 6: Enrich SPOT holdings with live prices ───
+    portfolio_value = 0.0
+    total_unrealized = 0.0
     
     for holding in spot_holdings:
         coingecko_id = holding['coin'].coingecko_id
@@ -2534,43 +2525,12 @@ def dashboard_overview(request):
         holding['current_value'] = current_value
         holding['unrealized_pnl'] = unrealized_pnl
         
-        spot_portfolio_value += current_value
-        spot_unrealized_pnl += unrealized_pnl
+        portfolio_value += current_value
+        total_unrealized += unrealized_pnl
     
-    # ─── Step 6B: Calculate LEVERAGE unrealized P&L ───
-    leverage_portfolio_value = 0.0
-    leverage_unrealized_pnl = 0.0
-    
-    for pos in leverage_positions:
-        coingecko_id = pos.coin.coingecko_id
-        coin_price_data = prices.get(coingecko_id, {})
-        live_price = coin_price_data.get('usd', 0.0)
-        
-        entry_price = pos.entry_price or 0.0
-        quantity = pos.quantity
-        leverage = pos.leverage or 1.0
-        collateral = pos.collateral or 0.0
-        
-        # Calculate unrealized P&L for leverage position
-        if pos.position_type == 'long':
-            pnl = (live_price - entry_price) * quantity * leverage - pos.funding_fees
-        else:  # short
-            pnl = (entry_price - live_price) * quantity * leverage - pos.funding_fees
-        
-        # Position value = collateral + unrealized P&L
-        position_value = collateral + pnl
-        
-        leverage_portfolio_value += position_value
-        leverage_unrealized_pnl += pnl
-    
-    # ─── Step 7: Calculate COMBINED portfolio totals ───
-    portfolio_value = spot_portfolio_value + leverage_portfolio_value
-    total_unrealized = spot_unrealized_pnl + leverage_unrealized_pnl
-    
-    # Calculate percentage based on spot cost basis + leverage collateral
+    # ─── Step 7: Calculate portfolio totals (SPOT only) ───
     spot_cost = sum(h['cost_basis'] for h in spot_holdings)
-    leverage_collateral = sum(pos.collateral or 0.0 for pos in leverage_positions)
-    total_invested = spot_cost + leverage_collateral
+    total_invested = spot_cost
     
     unrealized_pct = (total_unrealized / total_invested * 100) if total_invested > 0 else 0.0
     
@@ -2614,10 +2574,17 @@ def dashboard_overview(request):
     # ─── Step 9: Build recent trades ───
     recent_trades_data = []
     for trade in trades[:5]:  # First 5 (already ordered by trade_date desc)
-        # Get price based on trade type
-        price = trade.buy_price if trade.trade_type == 'buy' else trade.sell_price
-        if price is None:
-            price = 0.0
+        # Determine display information based on position type
+        if trade.position_type == 'spot':
+            # SPOT trade: use buy_price/sell_price
+            price = trade.buy_price if trade.trade_type == 'buy' else trade.sell_price
+            if price is None:
+                price = 0.0
+            display_type = trade.trade_type.upper()  # BUY or SELL
+        else:
+            # LEVERAGE trade: use entry_price, show position type
+            price = trade.entry_price if trade.entry_price else 0.0
+            display_type = f"{trade.position_type.upper()} {trade.leverage}x"  # LONG 5x or SHORT 20x
         
         # Get first emotion tag
         emotion_name = None
@@ -2629,7 +2596,7 @@ def dashboard_overview(request):
         
         recent_trades_data.append({
             'id': trade.id,
-            'trade_type': trade.trade_type,
+            'trade_type': display_type,
             'coin_symbol': trade.coin.symbol,
             'coin_name': trade.coin.name,
             'quantity': round(trade.quantity, 8),
@@ -2637,6 +2604,8 @@ def dashboard_overview(request):
             'trade_date': trade.trade_date.strftime('%Y-%m-%d'),
             'emotion_name': emotion_name,
             'emotion_color': emotion_color,
+            'position_type': trade.position_type,
+            'is_open': trade.is_open,
         })
     
     # ─── Step 10: Get AI feedback snippet ───
@@ -2690,10 +2659,11 @@ def dashboard_overview(request):
         elif trade.position_type in ['long', 'short']:
             if not trade.is_open and trade.exit_price and trade.entry_price:
                 is_closed = True
-                if trade.position_type == 'long':
-                    trade_pnl = (trade.exit_price - trade.entry_price) * trade.quantity * (trade.leverage or 1.0) - trade.funding_fees - trade.fee
-                else:  # short
-                    trade_pnl = (trade.entry_price - trade.exit_price) * trade.quantity * (trade.leverage or 1.0) - trade.funding_fees - trade.fee
+                # Use calculate_pnl utility function for consistency
+                from api.trade_utils import calculate_pnl
+                pnl_result = calculate_pnl(trade)
+                if pnl_result:
+                    trade_pnl = pnl_result['realized_pnl']
         
         if is_closed:
             closed_count += 1
