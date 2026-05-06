@@ -934,10 +934,13 @@ def portfolio_overview(request):
     user = request.user
     
     # Step 1: Calculate holdings from Trade table
-    # IMPORTANT: BUY trades represent open positions (coins you hold)
-    # SELL trades represent closed positions (realized P&L)
-    # Portfolio should only show open BUY positions
-    trades = Trade.objects.filter(user=user, trade_type='buy').select_related('coin')
+    # IMPORTANT: BUY trades add to holdings, SELL trades reduce holdings
+    # Portfolio should only show coins with net positive quantity (buys - sells > 0)
+    # Only consider SPOT trades (position_type='spot')
+    trades = Trade.objects.filter(
+        user=user, 
+        position_type='spot'
+    ).select_related('coin')
     
     holdings_dict = {}
     for trade in trades:
@@ -949,19 +952,27 @@ def portfolio_overview(request):
                 'total_cost': 0.0,
             }
         
-        holdings_dict[coin_id]['total_quantity'] += trade.quantity
-        if trade.buy_price:
-            holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+        # BUY trades: add quantity and cost
+        if trade.trade_type == 'buy':
+            holdings_dict[coin_id]['total_quantity'] += trade.quantity
+            if trade.buy_price:
+                holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+        
+        # SELL trades: subtract quantity (reduce holdings)
+        elif trade.trade_type == 'sell':
+            holdings_dict[coin_id]['total_quantity'] -= trade.quantity
     
-    # Calculate holdings (only positive quantities)
+    # Calculate holdings (only positive quantities with actual cost basis)
     holdings = []
     for coin_id, data in holdings_dict.items():
         total_quantity = data['total_quantity']
+        total_cost = data['total_cost']
         
+        # Only include if we have positive quantity AND positive cost basis
         # Use epsilon comparison for floats
-        if total_quantity > 0.000001:
-            avg_buy_price = data['total_cost'] / total_quantity if total_quantity > 0 else 0.0
-            cost_basis = data['total_cost']
+        if total_quantity > 0.000001 and total_cost > 0:
+            avg_buy_price = total_cost / total_quantity if total_quantity > 0 else 0.0
+            cost_basis = total_cost
             
             holdings.append({
                 'coin': data['coin'],
@@ -2413,12 +2424,14 @@ def dashboard_overview(request):
         .order_by('-trade_date')
     )
     
-    # ─── Step 4: Calculate holdings from BUY trades only (same as Portfolio) ───
-    # Only look at BUY trades to get current holdings
-    buy_trades = Trade.objects.filter(user=user, trade_type='buy').select_related('coin')
+    # ─── Step 4A: Calculate SPOT holdings (BUY - SELL) ───
+    spot_trades = Trade.objects.filter(
+        user=user, 
+        position_type='spot'
+    ).select_related('coin')
     
     holdings_dict = {}
-    for trade in buy_trades:
+    for trade in spot_trades:
         coin_id = trade.coin.id
         if coin_id not in holdings_dict:
             holdings_dict[coin_id] = {
@@ -2427,41 +2440,57 @@ def dashboard_overview(request):
                 'total_cost': 0.0,
             }
         
-        holdings_dict[coin_id]['total_quantity'] += trade.quantity
-        if trade.buy_price:
-            holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+        # BUY trades: add quantity and cost
+        if trade.trade_type == 'buy':
+            holdings_dict[coin_id]['total_quantity'] += trade.quantity
+            if trade.buy_price:
+                holdings_dict[coin_id]['total_cost'] += trade.quantity * trade.buy_price
+        
+        # SELL trades: subtract quantity (reduce holdings)
+        elif trade.trade_type == 'sell':
+            holdings_dict[coin_id]['total_quantity'] -= trade.quantity
     
-    # Calculate holdings (only positive quantities)
-    holdings = []
+    # Calculate spot holdings (only positive quantities with actual cost basis)
+    spot_holdings = []
     for coin_id, data in holdings_dict.items():
         total_quantity = data['total_quantity']
+        total_cost = data['total_cost']
         
-        # Use epsilon comparison for floats
-        if total_quantity > 0.000001:
-            avg_buy_price = data['total_cost'] / total_quantity if total_quantity > 0 else 0.0
-            cost_basis = data['total_cost']
+        # Only include if we have positive quantity AND positive cost basis
+        if total_quantity > 0.000001 and total_cost > 0:
+            avg_buy_price = total_cost / total_quantity if total_quantity > 0 else 0.0
             
-            holdings.append({
+            spot_holdings.append({
                 'coin': data['coin'],
                 'held_qty': total_quantity,
                 'avg_buy': avg_buy_price,
-                'cost_basis': cost_basis,
+                'cost_basis': total_cost,
             })
+    
+    # ─── Step 4B: Get open LEVERAGE positions ───
+    leverage_positions = Trade.objects.filter(
+        user=user,
+        position_type__in=['long', 'short'],
+        is_open=True
+    ).select_related('coin')
     
     # ─── Step 5: Fetch live prices from CoinGecko ───
     prices_live = True
     warning = None
     prices = {}
     
-    if holdings:
-        coingecko_ids = [h['coin'].coingecko_id for h in holdings]
-        ids_param = ','.join(coingecko_ids)
+    # Collect all unique coins from both spot and leverage
+    all_coins = set()
+    for h in spot_holdings:
+        all_coins.add(h['coin'].coingecko_id)
+    for pos in leverage_positions:
+        all_coins.add(pos.coin.coingecko_id)
+    
+    if all_coins:
+        ids_param = ','.join(all_coins)
         
         try:
             from django.conf import settings
-            
-            # Try to get CoinGecko API key (note: APIKey model was removed, so we skip this)
-            # In production, you might want to store this in settings or environment
             api_key = getattr(settings, 'COINGECKO_API_KEY', '')
             
             headers = {}
@@ -2486,8 +2515,11 @@ def dashboard_overview(request):
             warning = "Could not fetch live prices from CoinGecko. Showing last known values."
             prices = {}
     
-    # ─── Step 6: Enrich holdings with live prices ───
-    for holding in holdings:
+    # ─── Step 6A: Enrich SPOT holdings with live prices ───
+    spot_portfolio_value = 0.0
+    spot_unrealized_pnl = 0.0
+    
+    for holding in spot_holdings:
         coingecko_id = holding['coin'].coingecko_id
         coin_price_data = prices.get(coingecko_id, {})
         
@@ -2497,18 +2529,50 @@ def dashboard_overview(request):
         
         current_value = live_price * held_qty
         unrealized_pnl = (live_price - avg_buy) * held_qty
-        unrealized_pnl_pct = ((live_price - avg_buy) / avg_buy * 100) if avg_buy > 0 else 0.0
         
         holding['live_price'] = live_price
         holding['current_value'] = current_value
         holding['unrealized_pnl'] = unrealized_pnl
-        holding['unrealized_pnl_pct'] = unrealized_pnl_pct
+        
+        spot_portfolio_value += current_value
+        spot_unrealized_pnl += unrealized_pnl
     
-    # ─── Step 7: Calculate portfolio totals ───
-    portfolio_value = sum(h['current_value'] for h in holdings)
-    total_unrealized = sum(h['unrealized_pnl'] for h in holdings)
-    total_cost = sum(h['avg_buy'] * h['held_qty'] for h in holdings)
-    unrealized_pct = (total_unrealized / total_cost * 100) if total_cost > 0 else 0.0
+    # ─── Step 6B: Calculate LEVERAGE unrealized P&L ───
+    leverage_portfolio_value = 0.0
+    leverage_unrealized_pnl = 0.0
+    
+    for pos in leverage_positions:
+        coingecko_id = pos.coin.coingecko_id
+        coin_price_data = prices.get(coingecko_id, {})
+        live_price = coin_price_data.get('usd', 0.0)
+        
+        entry_price = pos.entry_price or 0.0
+        quantity = pos.quantity
+        leverage = pos.leverage or 1.0
+        collateral = pos.collateral or 0.0
+        
+        # Calculate unrealized P&L for leverage position
+        if pos.position_type == 'long':
+            pnl = (live_price - entry_price) * quantity * leverage - pos.funding_fees
+        else:  # short
+            pnl = (entry_price - live_price) * quantity * leverage - pos.funding_fees
+        
+        # Position value = collateral + unrealized P&L
+        position_value = collateral + pnl
+        
+        leverage_portfolio_value += position_value
+        leverage_unrealized_pnl += pnl
+    
+    # ─── Step 7: Calculate COMBINED portfolio totals ───
+    portfolio_value = spot_portfolio_value + leverage_portfolio_value
+    total_unrealized = spot_unrealized_pnl + leverage_unrealized_pnl
+    
+    # Calculate percentage based on spot cost basis + leverage collateral
+    spot_cost = sum(h['cost_basis'] for h in spot_holdings)
+    leverage_collateral = sum(pos.collateral or 0.0 for pos in leverage_positions)
+    total_invested = spot_cost + leverage_collateral
+    
+    unrealized_pct = (total_unrealized / total_invested * 100) if total_invested > 0 else 0.0
     
     if unrealized_pct >= 0:
         unrealized_label = f"+{unrealized_pct:.1f}% unrealized"
@@ -2604,15 +2668,35 @@ def dashboard_overview(request):
             'created_at': None,
         }
     
-    # ─── Step 10.5: Calculate realized P&L and win rate from trades ───
+    # ─── Step 10.5: Calculate realized P&L and win rate from ALL trades (spot + leverage) ───
+    # For SPOT trades: closed when both buy_price and sell_price exist
+    # For LEVERAGE trades: closed when is_open=False
+    
     closed_count = 0
     winning_count = 0
     realized_pnl = 0.0
     
     for trade in trades:
-        if trade.sell_price and trade.buy_price:
+        trade_pnl = 0.0
+        is_closed = False
+        
+        # SPOT trade: closed if has both buy and sell price
+        if trade.position_type == 'spot':
+            if trade.sell_price and trade.buy_price:
+                is_closed = True
+                trade_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        
+        # LEVERAGE trade: closed if is_open=False
+        elif trade.position_type in ['long', 'short']:
+            if not trade.is_open and trade.exit_price and trade.entry_price:
+                is_closed = True
+                if trade.position_type == 'long':
+                    trade_pnl = (trade.exit_price - trade.entry_price) * trade.quantity * (trade.leverage or 1.0) - trade.funding_fees - trade.fee
+                else:  # short
+                    trade_pnl = (trade.entry_price - trade.exit_price) * trade.quantity * (trade.leverage or 1.0) - trade.funding_fees - trade.fee
+        
+        if is_closed:
             closed_count += 1
-            trade_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
             realized_pnl += trade_pnl
             if trade_pnl > 0:
                 winning_count += 1
@@ -2637,12 +2721,12 @@ def dashboard_overview(request):
         'realized_label': realized_label,
     }
     
-    # ─── Step 12: Build holdings data ───
+    # ─── Step 12: Build holdings data (SPOT only for display) ───
     # Sort by current_value descending
-    holdings.sort(key=lambda x: x['current_value'], reverse=True)
+    spot_holdings.sort(key=lambda x: x['current_value'], reverse=True)
     
     holdings_data = []
-    for h in holdings:
+    for h in spot_holdings:
         holdings_data.append({
             'coin_id': h['coin'].id,
             'symbol': h['coin'].symbol,
@@ -2653,7 +2737,7 @@ def dashboard_overview(request):
             'live_price': round(h['live_price'], 2),
             'current_value': round(h['current_value'], 2),
             'unrealized_pnl': round(h['unrealized_pnl'], 2),
-            'unrealized_pnl_pct': round(h['unrealized_pnl_pct'], 1),
+            'unrealized_pnl_pct': round((h['unrealized_pnl'] / h['cost_basis'] * 100) if h['cost_basis'] > 0 else 0.0, 1),
         })
     
     # ─── Step 13: Return response ───
