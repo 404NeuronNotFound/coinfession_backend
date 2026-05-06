@@ -1517,6 +1517,7 @@ from .serializers import (
     CoinPnlSerializer, WinLossRatioSerializer, FeeImpactSerializer,
     TopTradeSerializer, PnlAnalysisSerializer
 )
+from .trade_utils import calculate_pnl
 from collections import defaultdict
 
 
@@ -1525,7 +1526,7 @@ from collections import defaultdict
 def pnl_analysis(request):
     """
     GET /api/pnl-analysis/
-    Get comprehensive P&L analysis with optional filtering.
+    Get comprehensive P&L analysis for CLOSED TRADES ONLY with optional filtering.
     
     Query Parameters:
     - date_from: Filter trades from this date (YYYY-MM-DD)
@@ -1536,7 +1537,9 @@ def pnl_analysis(request):
     """
     user = request.user
     
-    # ─── Step 1: Load trades ───
+    # ─── Step 1: Load CLOSED trades only ───
+    # For SPOT trades: must have both buy_price and sell_price
+    # For LEVERAGE trades: must have is_open=False
     queryset = Trade.objects.filter(user=user).select_related('coin').order_by('trade_date')
     
     # Apply filters
@@ -1552,29 +1555,43 @@ def pnl_analysis(request):
     if coin_id:
         queryset = queryset.filter(coin_id=coin_id)
     
-    trades = list(queryset)
+    all_trades = list(queryset)
     
-    # ─── Step 2: Separate closed vs open ───
+    # ─── Step 2: Filter to closed trades only ───
     closed_trades = []
-    open_trades = []
     
-    for trade in trades:
-        if trade.sell_price is not None and trade.buy_price is not None:
-            closed_trades.append(trade)
-        else:
-            open_trades.append(trade)
+    for trade in all_trades:
+        # SPOT trades: closed if both buy_price and sell_price exist
+        if trade.position_type == 'spot':
+            if trade.buy_price is not None and trade.sell_price is not None:
+                closed_trades.append(trade)
+        # LEVERAGE trades: closed if is_open=False
+        elif trade.position_type in ['long', 'short']:
+            if not trade.is_open:
+                closed_trades.append(trade)
     
     # ─── Step 3: Calculate realized_pnl for each closed trade ───
     trade_pnls = []  # List of (trade, pnl) tuples
     
     for trade in closed_trades:
-        pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
-        pnl = round(pnl, 2)
+        # Use the calculate_pnl utility function for consistent P&L calculation
+        pnl_result = calculate_pnl(trade)
+        
+        # calculate_pnl returns {'realized_pnl': value, 'roi': value} or None
+        if pnl_result and 'realized_pnl' in pnl_result:
+            pnl = pnl_result['realized_pnl']
+        else:
+            # Fallback for spot trades or if calculate_pnl returns None
+            if trade.position_type == 'spot' and trade.buy_price and trade.sell_price:
+                pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            else:
+                pnl = 0.0
+        
         trade_pnls.append((trade, pnl))
     
     # ─── Step 4: Build summary ───
-    total_trades = len(trades)
-    closed_count = len(closed_trades)
+    total_closed_trades = len(closed_trades)
+    closed_count = total_closed_trades
     
     winning_trades = [(t, pnl) for t, pnl in trade_pnls if pnl > 0]
     losing_trades = [(t, pnl) for t, pnl in trade_pnls if pnl < 0]
@@ -1608,7 +1625,7 @@ def pnl_analysis(request):
         'avg_win': round(avg_win, 2),
         'avg_loss': round(avg_loss, 2),
         'profit_factor': round(profit_factor, 2),
-        'total_trades': total_trades,
+        'total_trades': total_closed_trades,
         'closed_trades': closed_count,
         'winning_trades': winning_count,
         'losing_trades': losing_count,
