@@ -307,11 +307,22 @@ class TradeSerializer(serializers.ModelSerializer):
                     entry_price, leverage, position_type
                 )
             
-            # Update is_open based on exit_price
-            if 'exit_price' in validated_data:
+            # Handle is_open and exit_price relationship
+            # Priority: explicit is_open value from frontend
+            if 'is_open' in validated_data:
+                # Frontend explicitly set is_open
+                if not validated_data['is_open']:
+                    # Position is being closed
+                    if instance.close_date is None and 'close_date' not in validated_data:
+                        from django.utils import timezone
+                        validated_data['close_date'] = timezone.now()
+                else:
+                    # Position is being opened/kept open
+                    validated_data['close_date'] = None
+            elif 'exit_price' in validated_data:
+                # No explicit is_open, infer from exit_price
                 if validated_data['exit_price'] is not None:
                     validated_data['is_open'] = False
-                    # Set close_date if not already set
                     if instance.close_date is None:
                         from django.utils import timezone
                         validated_data['close_date'] = timezone.now()
@@ -874,6 +885,8 @@ class DashboardRecentTradeSerializer(serializers.Serializer):
     trade_date = serializers.CharField()
     emotion_name = serializers.CharField(allow_null=True)
     emotion_color = serializers.CharField(allow_null=True)
+    position_type = serializers.CharField()
+    is_open = serializers.BooleanField()
 
 
 class DashboardAISnippetSerializer(serializers.Serializer):
