@@ -1299,8 +1299,28 @@ def emotion_journal(request):
         
         for te in trade_emotions:
             trade = te.trade
-            if trade.sell_price is not None and trade.buy_price is not None:
-                realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            
+            # Check if trade is closed based on position type
+            is_closed = False
+            if trade.position_type == 'spot':
+                is_closed = trade.buy_price is not None and trade.sell_price is not None
+            elif trade.position_type in ['long', 'short']:
+                is_closed = not trade.is_open
+            
+            if is_closed:
+                # Use calculate_pnl utility for consistent P&L calculation
+                from api.trade_utils import calculate_pnl
+                pnl_result = calculate_pnl(trade)
+                
+                if pnl_result and 'realized_pnl' in pnl_result:
+                    realized_pnl = pnl_result['realized_pnl']
+                else:
+                    # Fallback for spot trades
+                    if trade.position_type == 'spot' and trade.buy_price and trade.sell_price:
+                        realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+                    else:
+                        realized_pnl = 0.0
+                
                 closed_pnls.append(realized_pnl)
                 closed_count += 1
         
@@ -1364,10 +1384,29 @@ def emotion_journal(request):
             emotion_color = emotion_tag.color
             emotion_id = emotion_tag.id
         
-        # Calculate realized_pnl
+        # Calculate realized_pnl based on position type
         realized_pnl = None
-        if trade.sell_price is not None and trade.buy_price is not None:
-            realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        is_open = True
+        
+        if trade.position_type == 'spot':
+            is_open = trade.sell_price is None
+            if not is_open:
+                # Use calculate_pnl for consistency
+                from api.trade_utils import calculate_pnl
+                pnl_result = calculate_pnl(trade)
+                if pnl_result and 'realized_pnl' in pnl_result:
+                    realized_pnl = pnl_result['realized_pnl']
+                else:
+                    # Fallback
+                    realized_pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        elif trade.position_type in ['long', 'short']:
+            is_open = trade.is_open
+            if not is_open:
+                # Use calculate_pnl for leverage trades
+                from api.trade_utils import calculate_pnl
+                pnl_result = calculate_pnl(trade)
+                if pnl_result and 'realized_pnl' in pnl_result:
+                    realized_pnl = pnl_result['realized_pnl']
         
         # Format date in user's timezone (cross-platform: remove leading zero from day)
         from datetime import datetime
@@ -1392,7 +1431,7 @@ def emotion_journal(request):
             'emotion_color': emotion_color,
             'emotion_id': emotion_id,
             'realized_pnl': round(realized_pnl, 2) if realized_pnl is not None else None,
-            'is_open': trade.sell_price is None,
+            'is_open': is_open,
             'notes': trade.notes or "",
         })
     
@@ -1400,46 +1439,49 @@ def emotion_journal(request):
     insights_data = []
     
     if emotion_stats_list:
-        # GOOD insight — best performing emotion
+        # GOOD insight — best performing emotion (lowered threshold)
         good_candidates = [
             e for e in emotion_stats_list
-            if e['avg_pnl'] > 0 and e['trade_count'] >= 3
+            if e['avg_pnl'] > 0 and e['closed_count'] >= 1
         ]
         if good_candidates:
             best = max(good_candidates, key=lambda x: x['win_rate'])
+            avg_pnl_formatted = f"+${abs(best['avg_pnl']):.2f}" if best['avg_pnl'] >= 0 else f"-${abs(best['avg_pnl']):.2f}"
             insights_data.append({
                 'type': 'good',
                 'title': f"{best['name']} trades are your best trades",
-                'body': f"{best['win_rate']}% win rate with an average of +${best['avg_pnl']} per trade. Keep doing this.",
+                'body': f"{best['win_rate']}% win rate with an average of {avg_pnl_formatted} per trade. Keep doing this.",
             })
         
-        # BAD insight — worst performing emotion
+        # BAD insight — worst performing emotion (lowered threshold)
         bad_candidates = [
             e for e in emotion_stats_list
-            if e['avg_pnl'] < 0 and e['trade_count'] >= 2
+            if e['avg_pnl'] < 0 and e['closed_count'] >= 1
         ]
         if bad_candidates:
             worst = min(bad_candidates, key=lambda x: x['avg_pnl'])
+            total_pnl_formatted = f"-${abs(worst['total_pnl']):.2f}"
+            avg_pnl_formatted = f"-${abs(worst['avg_pnl']):.2f}"
             insights_data.append({
                 'type': 'bad',
                 'title': f"{worst['name']} is destroying value",
-                'body': f"Every {worst['name']} trade averaged ${worst['avg_pnl']}. That is ${worst['total_pnl']} in total losses.",
+                'body': f"Every {worst['name']} trade averaged {avg_pnl_formatted}. That is {total_pnl_formatted} in total losses.",
             })
         
-        # WARN insight — most frequent losing emotion
+        # WARN insight — most frequent losing emotion (lowered threshold)
         warn_candidates = [
             e for e in emotion_stats_list
-            if e['win_rate'] < 40
+            if e['win_rate'] < 50 and e['closed_count'] >= 1
         ]
         if warn_candidates:
-            most_frequent = max(warn_candidates, key=lambda x: x['trade_count'])
+            most_frequent = max(warn_candidates, key=lambda x: x['closed_count'])
             insights_data.append({
                 'type': 'warn',
                 'title': f"{most_frequent['name']} entries have a {most_frequent['win_rate']}% win rate",
-                'body': f"{most_frequent['trade_count']} trades tagged {most_frequent['name']} with only {most_frequent['win_rate']}% profitable. Review your entry rules for these trades.",
+                'body': f"{most_frequent['closed_count']} closed trade{'s' if most_frequent['closed_count'] > 1 else ''} tagged {most_frequent['name']} with only {most_frequent['win_rate']}% profitable. Review your entry rules for these trades.",
             })
     
-    # ─── Step 5: Build heatmap (full year 2026: Jan 1 - Dec 31) ───
+    # ─── Step 5: Build heatmap for selected year ───
     from datetime import date, datetime
     from django.utils import timezone as django_tz
     import pytz
@@ -1448,9 +1490,31 @@ def emotion_journal(request):
     # In production, this should come from user profile
     user_timezone = pytz.timezone('Asia/Manila')
     
-    # Full year 2026
-    start_date = date(2026, 1, 1)
-    end_date = date(2026, 12, 31)
+    # Get year parameter from request, default to current year
+    selected_year = int(request.query_params.get('year', datetime.now().year))
+    
+    # Calculate available years (from first trade to current year)
+    available_years = []
+    if trades:
+        # Get the earliest trade year
+        earliest_trade = trades.order_by('trade_date').first()
+        if earliest_trade:
+            if isinstance(earliest_trade.trade_date, datetime):
+                if earliest_trade.trade_date.tzinfo is not None:
+                    local_dt = earliest_trade.trade_date.astimezone(user_timezone)
+                else:
+                    utc_dt = pytz.UTC.localize(earliest_trade.trade_date)
+                    local_dt = utc_dt.astimezone(user_timezone)
+                first_year = local_dt.year
+            else:
+                first_year = earliest_trade.trade_date.year
+            
+            current_year = datetime.now().year
+            available_years = list(range(first_year, current_year + 1))
+    
+    # Build heatmap for selected year
+    start_date = date(selected_year, 1, 1)
+    end_date = date(selected_year, 12, 31)
     
     # Build a map of dates to trade counts for efficiency
     date_trade_map = {}
@@ -1504,6 +1568,8 @@ def emotion_journal(request):
         'trades': trades_data,
         'insights': insights_data,
         'heatmap': heatmap_data,
+        'available_years': available_years,
+        'selected_year': selected_year,
     }
     
     serializer = EmotionJournalSerializer(response_data)
@@ -1853,19 +1919,31 @@ def monthly_report_list(request):
         # Calculate metrics
         total_trades = len(month_trades)
         
-        closed_trades = [
-            t for t in month_trades
-            if t.sell_price is not None and t.buy_price is not None
-        ]
+        # Separate closed trades based on position type
+        closed_trades = []
+        for t in month_trades:
+            if t.position_type == 'spot':
+                # For spot: closed if both prices exist
+                if t.sell_price is not None and t.buy_price is not None:
+                    closed_trades.append(t)
+            else:
+                # For leverage: closed if is_open is False
+                if not t.is_open:
+                    closed_trades.append(t)
         
         closed_count = len(closed_trades)
         
-        # Calculate realized_pnl and winning_trades
+        # Calculate realized_pnl and winning_trades using calculate_pnl
         realized_pnl = 0.0
         winning_trades = 0
         
         for trade in closed_trades:
-            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            from api.trade_utils import calculate_pnl
+            pnl_result = calculate_pnl(trade)
+            if isinstance(pnl_result, dict):
+                pnl = pnl_result.get('realized_pnl', 0.0)
+            else:
+                pnl = pnl_result
             realized_pnl += pnl
             if pnl > 0:
                 winning_trades += 1
@@ -1912,6 +1990,8 @@ def monthly_report_detail(request, year, month):
     GET /api/monthly-reports/<year>/<month>/
     Returns all data needed to render the full monthly report page for one selected month.
     """
+    from .trade_utils import calculate_pnl
+    
     user = request.user
     
     # Step 1: Validate year and month
@@ -1937,16 +2017,34 @@ def monthly_report_detail(request, year, month):
     # Step 3: Calculate metrics
     total_trades = trades.count()
     
+    # Separate spot and leverage trades
+    spot_trades = []
+    leverage_trades = []
     closed_trades = []
     open_trades = []
     
     for trade in trades:
-        if trade.sell_price is not None and trade.buy_price is not None:
-            closed_trades.append(trade)
+        if trade.position_type == 'spot':
+            spot_trades.append(trade)
+        elif trade.position_type in ['long', 'short']:
+            leverage_trades.append(trade)
+            
+        if trade.position_type == 'spot':
+            # For spot: closed if both buy_price and sell_price exist
+            if trade.sell_price is not None and trade.buy_price is not None:
+                closed_trades.append(trade)
+            else:
+                open_trades.append(trade)
         else:
-            open_trades.append(trade)
+            # For leverage: closed if is_open is False
+            if not trade.is_open:
+                closed_trades.append(trade)
+            else:
+                open_trades.append(trade)
     
     closed_count = len(closed_trades)
+    spot_count = len(spot_trades)
+    leverage_count = len(leverage_trades)
     
     # Calculate P&L metrics
     realized_pnl = 0.0
@@ -1959,8 +2057,21 @@ def monthly_report_detail(request, year, month):
     for trade in trades:
         total_fees += trade.fee
         
-        if trade.sell_price is not None and trade.buy_price is not None:
-            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+        # Check if trade is closed
+        is_closed = False
+        if trade.position_type == 'spot':
+            is_closed = trade.sell_price is not None and trade.buy_price is not None
+        else:
+            is_closed = not trade.is_open
+            
+        if is_closed:
+            # Use calculate_pnl utility for consistent calculation
+            pnl_result = calculate_pnl(trade)
+            if isinstance(pnl_result, dict):
+                pnl = pnl_result.get('realized_pnl', 0.0)
+            else:
+                pnl = pnl_result
+            
             pnl = round(pnl, 2)
             realized_pnl += pnl
             trade_pnls.append((trade, pnl))
@@ -1982,6 +2093,45 @@ def monthly_report_detail(request, year, month):
     # Calculate avg_pnl_per_trade
     avg_pnl_per_trade = (realized_pnl / closed_count) if closed_count > 0 else 0.0
     
+    # Calculate additional metrics
+    avg_hold_time_days = 0.0
+    largest_win = 0.0
+    largest_loss = 0.0
+    
+    if trade_pnls:
+        # Calculate average hold time for closed trades
+        total_hold_days = 0
+        hold_count = 0
+        
+        for trade, pnl in trade_pnls:
+            if trade.position_type == 'spot':
+                # For spot trades, we don't have separate entry/exit dates
+                # Skip hold time calculation for spot trades
+                pass
+            elif trade.position_type in ['long', 'short'] and trade.close_date:
+                hold_days = (trade.close_date - trade.trade_date).days
+                total_hold_days += hold_days
+                hold_count += 1
+        
+        if hold_count > 0:
+            avg_hold_time_days = total_hold_days / hold_count
+        
+        # Find largest win and loss
+        pnl_values = [pnl for _, pnl in trade_pnls]
+        if pnl_values:
+            largest_win = max(pnl_values)
+            # Only set largest_loss if there are actual losses
+            losing_pnls = [pnl for pnl in pnl_values if pnl < 0]
+            if losing_pnls:
+                largest_loss = min(losing_pnls)
+            else:
+                largest_loss = 0.0
+    
+    # Calculate profit factor (gross profit / gross loss)
+    gross_profit = sum(pnl for _, pnl in trade_pnls if pnl > 0)
+    gross_loss = abs(sum(pnl for _, pnl in trade_pnls if pnl < 0))
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 0.0
+    
     # Month label (full name)
     month_label = f"{calendar.month_name[month]} {year}"
     
@@ -1992,12 +2142,18 @@ def monthly_report_detail(request, year, month):
         'realized_pnl': round(realized_pnl, 2),
         'win_rate': round(win_rate, 1),
         'total_trades': total_trades,
+        'spot_trades': spot_count,
+        'leverage_trades': leverage_count,
         'closed_trades': closed_count,
         'winning_trades': winning_trades,
         'losing_trades': losing_trades,
         'total_fees': round(total_fees, 2),
         'fees_pct_of_pnl': round(fees_pct_of_pnl, 1),
         'avg_pnl_per_trade': round(avg_pnl_per_trade, 2),
+        'avg_hold_time_days': round(avg_hold_time_days, 1),
+        'largest_win': round(largest_win, 2),
+        'largest_loss': round(largest_loss, 2),
+        'profit_factor': round(profit_factor, 2),
     }
     
     # Step 4: Build trades list
@@ -2015,9 +2171,24 @@ def monthly_report_detail(request, year, month):
         
         # Calculate realized_pnl
         realized_pnl_value = None
-        if trade.sell_price is not None and trade.buy_price is not None:
-            realized_pnl_value = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
-            realized_pnl_value = round(realized_pnl_value, 2)
+        if trade.position_type == 'spot':
+            # For spot: closed if both prices exist
+            if trade.sell_price is not None and trade.buy_price is not None:
+                pnl_result = calculate_pnl(trade)
+                if isinstance(pnl_result, dict):
+                    realized_pnl_value = pnl_result.get('realized_pnl', 0.0)
+                else:
+                    realized_pnl_value = pnl_result
+                realized_pnl_value = round(realized_pnl_value, 2)
+        else:
+            # For leverage: closed if is_open is False
+            if not trade.is_open:
+                pnl_result = calculate_pnl(trade)
+                if isinstance(pnl_result, dict):
+                    realized_pnl_value = pnl_result.get('realized_pnl', 0.0)
+                else:
+                    realized_pnl_value = pnl_result
+                realized_pnl_value = round(realized_pnl_value, 2)
         
         # Format date (cross-platform: remove leading zero from day)
         date_str = trade.trade_date.strftime("%b %d").lstrip("0")
@@ -2033,7 +2204,7 @@ def monthly_report_detail(request, year, month):
             'sell_price': trade.sell_price,
             'fee': trade.fee,
             'realized_pnl': realized_pnl_value,
-            'is_open': trade.sell_price is None,
+            'is_open': trade.is_open if trade.position_type in ['long', 'short'] else trade.sell_price is None,
             'emotions': emotions_list,
             'notes': trade.notes or "",
         })
@@ -2072,34 +2243,37 @@ def monthly_report_detail(request, year, month):
             'notes': best_trade.notes or "",
         }
         
-        # Worst trade (lowest P&L)
-        worst_trade, worst_pnl = min(trade_pnls, key=lambda x: x[1])
+        # Worst trade (lowest P&L) - only if there are actual losing trades
+        losing_trades = [(trade, pnl) for trade, pnl in trade_pnls if pnl < 0]
         
-        worst_emotions = []
-        for te in worst_trade.emotions.all():
-            worst_emotions.append({
-                'id': te.emotion_tag.id,
-                'name': te.emotion_tag.name,
-                'color': te.emotion_tag.color,
-            })
-        
-        worst_date_str = worst_trade.trade_date.strftime("%b %d").lstrip("0")
-        
-        worst_trade_data = {
-            'id': worst_trade.id,
-            'date': worst_date_str,
-            'trade_type': worst_trade.trade_type,
-            'coin_symbol': worst_trade.coin.symbol,
-            'coin_name': worst_trade.coin.name,
-            'quantity': worst_trade.quantity,
-            'buy_price': worst_trade.buy_price,
-            'sell_price': worst_trade.sell_price,
-            'fee': worst_trade.fee,
-            'realized_pnl': worst_pnl,
-            'is_open': False,
-            'emotions': worst_emotions,
-            'notes': worst_trade.notes or "",
-        }
+        if losing_trades:
+            worst_trade, worst_pnl = min(losing_trades, key=lambda x: x[1])
+            
+            worst_emotions = []
+            for te in worst_trade.emotions.all():
+                worst_emotions.append({
+                    'id': te.emotion_tag.id,
+                    'name': te.emotion_tag.name,
+                    'color': te.emotion_tag.color,
+                })
+            
+            worst_date_str = worst_trade.trade_date.strftime("%b %d").lstrip("0")
+            
+            worst_trade_data = {
+                'id': worst_trade.id,
+                'date': worst_date_str,
+                'trade_type': worst_trade.trade_type,
+                'coin_symbol': worst_trade.coin.symbol,
+                'coin_name': worst_trade.coin.name,
+                'quantity': worst_trade.quantity,
+                'buy_price': worst_trade.buy_price,
+                'sell_price': worst_trade.sell_price,
+                'fee': worst_trade.fee,
+                'realized_pnl': worst_pnl,
+                'is_open': False,
+                'emotions': worst_emotions,
+                'notes': worst_trade.notes or "",
+            }
     
     best_worst_data = {
         'best_trade': best_trade_data,
@@ -2161,19 +2335,30 @@ def monthly_report_detail(request, year, month):
         # Calculate metrics
         total_trades_month = len(month_trades)
         
-        closed_trades_month = [
-            t for t in month_trades
-            if t.sell_price is not None and t.buy_price is not None
-        ]
+        # Separate closed trades based on position type
+        closed_trades_month = []
+        for t in month_trades:
+            if t.position_type == 'spot':
+                # For spot: closed if both prices exist
+                if t.sell_price is not None and t.buy_price is not None:
+                    closed_trades_month.append(t)
+            else:
+                # For leverage: closed if is_open is False
+                if not t.is_open:
+                    closed_trades_month.append(t)
         
         closed_count_month = len(closed_trades_month)
         
-        # Calculate realized_pnl and winning_trades
+        # Calculate realized_pnl and winning_trades using calculate_pnl
         realized_pnl_month = 0.0
         winning_trades_month = 0
         
         for trade in closed_trades_month:
-            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            pnl_result = calculate_pnl(trade)
+            if isinstance(pnl_result, dict):
+                pnl = pnl_result.get('realized_pnl', 0.0)
+            else:
+                pnl = pnl_result
             realized_pnl_month += pnl
             if pnl > 0:
                 winning_trades_month += 1

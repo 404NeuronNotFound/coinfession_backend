@@ -613,6 +613,8 @@ class EmotionJournalSerializer(serializers.Serializer):
     trades = EmotionTradeSerializer(many=True)
     insights = PatternInsightSerializer(many=True)
     heatmap = HeatmapDaySerializer(many=True)
+    available_years = serializers.ListField(child=serializers.IntegerField())
+    selected_year = serializers.IntegerField()
 
 
 # ─── P&L Analysis Serializers ─────────────────────────────────────
@@ -710,12 +712,18 @@ class MonthlyReportMetricsSerializer(serializers.Serializer):
     realized_pnl = serializers.FloatField()
     win_rate = serializers.FloatField()
     total_trades = serializers.IntegerField()
+    spot_trades = serializers.IntegerField()
+    leverage_trades = serializers.IntegerField()
     closed_trades = serializers.IntegerField()
     winning_trades = serializers.IntegerField()
     losing_trades = serializers.IntegerField()
     total_fees = serializers.FloatField()
     fees_pct_of_pnl = serializers.FloatField()
     avg_pnl_per_trade = serializers.FloatField()
+    avg_hold_time_days = serializers.FloatField()
+    largest_win = serializers.FloatField()
+    largest_loss = serializers.FloatField()
+    profit_factor = serializers.FloatField()
 
 
 class MonthTradeSerializer(serializers.Serializer):
