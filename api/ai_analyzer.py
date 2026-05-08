@@ -1,11 +1,127 @@
 """
 AI Feedback Analyzer - Advanced rule-based trading pattern analysis
 Analyzes user trades and generates intelligent, actionable feedback
+Includes per-trade analysis and market trend recommendations
 """
 import json
 from datetime import datetime, timedelta
 from collections import defaultdict
 import statistics
+
+
+class PerTradeAnalyzer:
+    """Analyzes individual trades with market context"""
+    
+    def __init__(self, trade):
+        self.trade = trade
+        self.pnl = self._calculate_pnl()
+        self.trade_type_label = self._get_trade_type_label()
+        self.position_type_label = self._get_position_type_label()
+    
+    def _calculate_pnl(self):
+        """Calculate P&L for the trade"""
+        if self.trade.position_type == 'spot':
+            if self.trade.sell_price and self.trade.buy_price:
+                return (self.trade.sell_price - self.trade.buy_price) * self.trade.quantity - self.trade.fee
+            return 0
+        else:  # long or short
+            if self.trade.exit_price and self.trade.entry_price:
+                if self.trade.position_type == 'long':
+                    return (self.trade.exit_price - self.trade.entry_price) * self.trade.quantity - self.trade.funding_fees
+                else:  # short
+                    return (self.trade.entry_price - self.trade.exit_price) * self.trade.quantity - self.trade.funding_fees
+            return 0
+    
+    def _get_trade_type_label(self):
+        """Get human-readable trade type"""
+        if self.trade.position_type == 'spot':
+            return 'BUY' if self.trade.trade_type == 'buy' else 'SELL'
+        else:
+            return self.trade.position_type.upper()
+    
+    def _get_position_type_label(self):
+        """Get human-readable position type"""
+        return self.trade.position_type.upper()
+    
+    def get_analysis(self):
+        """Get per-trade analysis"""
+        emotions = [te.emotion_tag.name for te in self.trade.emotions.all()]
+        
+        # Determine if trade was good or bad
+        is_winning = self.pnl > 0
+        
+        # Generate trade-specific feedback
+        feedback = self._generate_trade_feedback(is_winning, emotions)
+        
+        return {
+            'trade_id': self.trade.id,
+            'coin': self.trade.coin.symbol,
+            'position_type': self.position_type_label,
+            'trade_type': self.trade_type_label,
+            'entry_price': self.trade.entry_price or self.trade.buy_price,
+            'exit_price': self.trade.exit_price or self.trade.sell_price,
+            'quantity': self.trade.quantity,
+            'pnl': round(self.pnl, 2),
+            'pnl_percent': self._calculate_pnl_percent(),
+            'emotions': emotions,
+            'trade_date': self.trade.trade_date.isoformat(),
+            'feedback': feedback,
+            'recommendation': self._get_hold_sell_recommendation()
+        }
+    
+    def _calculate_pnl_percent(self):
+        """Calculate P&L percentage"""
+        if self.trade.position_type == 'spot':
+            entry = self.trade.buy_price
+        else:
+            entry = self.trade.entry_price
+        
+        if entry and entry > 0:
+            if self.trade.position_type == 'spot':
+                exit_price = self.trade.sell_price
+            else:
+                exit_price = self.trade.exit_price
+            
+            if exit_price:
+                return round(((exit_price - entry) / entry) * 100, 2)
+        return 0
+    
+    def _generate_trade_feedback(self, is_winning, emotions):
+        """Generate specific feedback for this trade"""
+        if is_winning:
+            feedback = f"✓ Winning trade. "
+            if self.pnl > 100:
+                feedback += "Excellent execution. "
+            if emotions:
+                feedback += f"You were {emotions[0].lower()}—remember this state for future trades."
+        else:
+            feedback = f"✕ Losing trade. "
+            if self.pnl < -100:
+                feedback += "This was a significant loss. "
+            if emotions:
+                feedback += f"You were {emotions[0].lower()}—avoid trading in this state."
+        
+        return feedback
+    
+    def _get_hold_sell_recommendation(self):
+        """Get hold/sell recommendation based on trade status"""
+        if self.trade.position_type == 'spot':
+            if self.trade.sell_price:
+                return "CLOSED"
+            else:
+                # Open position - recommend based on recent performance
+                if self.pnl > 0:
+                    return "HOLD - Position is profitable"
+                else:
+                    return "CONSIDER SELLING - Position is underwater"
+        else:
+            if self.trade.is_open:
+                if self.pnl > 0:
+                    return "HOLD - Position is profitable"
+                else:
+                    return "CONSIDER CLOSING - Position is losing"
+            else:
+                return "CLOSED"
 
 
 class TradingAnalyzer:
@@ -125,10 +241,153 @@ class TradingAnalyzer:
             'whats_working': self._identify_strengths(),
             'whats_hurting': self._identify_weaknesses(),
             'one_thing_to_fix': self._identify_top_priority(),
-            'action_items': self._generate_action_items()
+            'action_items': self._generate_action_items(),
+            'per_trade_analysis': self._generate_per_trade_analysis(),
+            'market_insights': self._generate_market_insights()
         }
         
         return json.dumps(feedback)
+    
+    def _generate_per_trade_analysis(self):
+        """Generate analysis for each individual trade"""
+        per_trade = []
+        
+        # Analyze last 10 trades for detailed feedback
+        recent_trades = sorted(self.trades, key=lambda t: t.trade_date, reverse=True)[:10]
+        
+        for trade in recent_trades:
+            analyzer = PerTradeAnalyzer(trade)
+            per_trade.append(analyzer.get_analysis())
+        
+        return per_trade
+    
+    def _generate_market_insights(self):
+        """Generate market trend insights and coin recommendations"""
+        insights = {
+            'coin_recommendations': self._generate_coin_recommendations(),
+            'position_type_analysis': self._analyze_position_types(),
+            'market_trend_summary': self._generate_market_trend_summary()
+        }
+        return insights
+    
+    def _generate_coin_recommendations(self):
+        """Generate hold/sell recommendations for each coin"""
+        recommendations = []
+        
+        for coin_symbol, pnls in self.stats['coins'].items():
+            if len(pnls) < 2:
+                continue
+            
+            total_pnl = sum(pnls)
+            win_rate = len([p for p in pnls if p > 0]) / len(pnls) * 100
+            avg_pnl = total_pnl / len(pnls)
+            
+            # Determine recommendation
+            if total_pnl > 0 and win_rate > 60:
+                recommendation = "STRONG BUY - Excellent track record"
+                confidence = "HIGH"
+            elif total_pnl > 0 and win_rate > 50:
+                recommendation = "BUY - Positive performance"
+                confidence = "MEDIUM"
+            elif total_pnl > 0:
+                recommendation = "HOLD - Slightly profitable but inconsistent"
+                confidence = "LOW"
+            elif win_rate > 50:
+                recommendation = "HOLD - Good win rate but small losses"
+                confidence = "MEDIUM"
+            else:
+                recommendation = "AVOID - Losing record"
+                confidence = "HIGH"
+            
+            recommendations.append({
+                'coin': coin_symbol,
+                'total_pnl': round(total_pnl, 2),
+                'trades': len(pnls),
+                'win_rate': round(win_rate, 1),
+                'avg_pnl_per_trade': round(avg_pnl, 2),
+                'recommendation': recommendation,
+                'confidence': confidence
+            })
+        
+        # Sort by total PnL descending
+        return sorted(recommendations, key=lambda x: x['total_pnl'], reverse=True)
+    
+    def _analyze_position_types(self):
+        """Analyze performance by position type (spot vs leverage)"""
+        analysis = {}
+        
+        spot_trades = [t for t in self.closed_trades if t.position_type == 'spot']
+        leverage_trades = [t for t in self.closed_trades if t.position_type in ['long', 'short']]
+        
+        # Analyze spot trades
+        if spot_trades:
+            spot_pnls = []
+            for t in spot_trades:
+                pnl = (t.sell_price - t.buy_price) * t.quantity - t.fee
+                spot_pnls.append(pnl)
+            
+            analysis['spot'] = {
+                'total_trades': len(spot_trades),
+                'total_pnl': round(sum(spot_pnls), 2),
+                'win_rate': round(len([p for p in spot_pnls if p > 0]) / len(spot_pnls) * 100, 1),
+                'avg_pnl': round(sum(spot_pnls) / len(spot_pnls), 2),
+                'recommendation': 'FOCUS HERE' if sum(spot_pnls) > 0 else 'NEEDS WORK'
+            }
+        
+        # Analyze leverage trades
+        if leverage_trades:
+            leverage_pnls = []
+            for t in leverage_trades:
+                if t.position_type == 'long':
+                    pnl = (t.exit_price - t.entry_price) * t.quantity - t.funding_fees if t.exit_price else 0
+                else:  # short
+                    pnl = (t.entry_price - t.exit_price) * t.quantity - t.funding_fees if t.exit_price else 0
+                leverage_pnls.append(pnl)
+            
+            analysis['leverage'] = {
+                'total_trades': len(leverage_trades),
+                'total_pnl': round(sum(leverage_pnls), 2),
+                'win_rate': round(len([p for p in leverage_pnls if p > 0]) / len(leverage_pnls) * 100, 1) if leverage_pnls else 0,
+                'avg_pnl': round(sum(leverage_pnls) / len(leverage_pnls), 2) if leverage_pnls else 0,
+                'recommendation': 'FOCUS HERE' if sum(leverage_pnls) > 0 else 'NEEDS WORK'
+            }
+        
+        return analysis
+    
+    def _generate_market_trend_summary(self):
+        """Generate summary of market trends based on trading data"""
+        summary = "Based on your trading history: "
+        
+        # Identify best performing period
+        trades_by_day = defaultdict(list)
+        for trade in self.closed_trades:
+            day = trade.trade_date.strftime('%A')
+            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            trades_by_day[day].append(pnl)
+        
+        best_day = max(trades_by_day.items(), key=lambda x: sum(x[1]), default=None)
+        if best_day:
+            summary += f"You trade best on {best_day[0]}s. "
+        
+        # Identify best performing hour
+        trades_by_hour = defaultdict(list)
+        for trade in self.closed_trades:
+            hour = trade.trade_date.hour
+            pnl = (trade.sell_price - trade.buy_price) * trade.quantity - trade.fee
+            trades_by_hour[hour].append(pnl)
+        
+        best_hour = max(trades_by_hour.items(), key=lambda x: sum(x[1]), default=None)
+        if best_hour:
+            summary += f"Your best trading hour is {best_hour[0]}:00. "
+        
+        # Volatility insight
+        if self.stats.get('pnl_std_dev', 0) > 0:
+            if self.stats['pnl_std_dev'] > 200:
+                summary += "Your P&L swings wildly—you're taking on too much risk per trade. "
+            elif self.stats['pnl_std_dev'] < 50:
+                summary += "Your P&L is consistent—you've found a stable strategy. "
+        
+        return summary
     
     def _generate_no_data_feedback(self):
         """Feedback when there's insufficient data"""

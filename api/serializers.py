@@ -805,6 +805,50 @@ class AIFeedbackSectionSerializer(serializers.Serializer):
     body = serializers.CharField()
 
 
+class PerTradeAnalysisSerializer(serializers.Serializer):
+    """Individual trade analysis"""
+    trade_id = serializers.IntegerField()
+    coin = serializers.CharField()
+    position_type = serializers.CharField()
+    trade_type = serializers.CharField()
+    entry_price = serializers.FloatField()
+    exit_price = serializers.FloatField()
+    quantity = serializers.FloatField()
+    pnl = serializers.FloatField()
+    pnl_percent = serializers.FloatField()
+    emotions = serializers.ListField(child=serializers.CharField())
+    trade_date = serializers.CharField()
+    feedback = serializers.CharField()
+    recommendation = serializers.CharField()
+
+
+class CoinRecommendationSerializer(serializers.Serializer):
+    """Coin-specific recommendation"""
+    coin = serializers.CharField()
+    total_pnl = serializers.FloatField()
+    trades = serializers.IntegerField()
+    win_rate = serializers.FloatField()
+    avg_pnl_per_trade = serializers.FloatField()
+    recommendation = serializers.CharField()
+    confidence = serializers.CharField()
+
+
+class PositionTypeAnalysisSerializer(serializers.Serializer):
+    """Analysis by position type (spot vs leverage)"""
+    total_trades = serializers.IntegerField()
+    total_pnl = serializers.FloatField()
+    win_rate = serializers.FloatField()
+    avg_pnl = serializers.FloatField()
+    recommendation = serializers.CharField()
+
+
+class MarketInsightsSerializer(serializers.Serializer):
+    """Market trend insights and recommendations"""
+    coin_recommendations = CoinRecommendationSerializer(many=True)
+    position_type_analysis = serializers.DictField()
+    market_trend_summary = serializers.CharField()
+
+
 class AIFeedbackParsedSerializer(serializers.Serializer):
     """The parsed feedback_text JSON"""
     overall = serializers.CharField()
@@ -812,6 +856,9 @@ class AIFeedbackParsedSerializer(serializers.Serializer):
     whats_working = AIFeedbackSectionSerializer(many=True)
     whats_hurting = AIFeedbackSectionSerializer(many=True)
     one_thing_to_fix = serializers.CharField()
+    action_items = serializers.ListField(required=False)
+    per_trade_analysis = PerTradeAnalysisSerializer(many=True, required=False)
+    market_insights = MarketInsightsSerializer(required=False)
 
 
 class AIFeedbackSerializer(serializers.ModelSerializer):
