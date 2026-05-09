@@ -30,6 +30,8 @@ from .views import (
     ai_feedback_generate,
     ai_feedback_list,
     ai_feedback_delete,
+    ai_feedback_generate_ml_test,
+    ai_feedback_ml_status,
     dashboard_overview,
     danger_zone_status,
     reset_portfolio_snapshots,
@@ -91,6 +93,8 @@ urlpatterns = [
     # AI Feedback (preview and generate must come before <int:pk>)
     path('ai-feedback/preview/', ai_feedback_preview, name='ai_feedback_preview'),
     path('ai-feedback/generate/', ai_feedback_generate, name='ai_feedback_generate'),
+    path('ai-feedback/generate-ml-test/', ai_feedback_generate_ml_test, name='ai_feedback_generate_ml_test'),
+    path('ai-feedback/ml-status/', ai_feedback_ml_status, name='ai_feedback_ml_status'),
     path('ai-feedback/', ai_feedback_list, name='ai_feedback_list'),
     path('ai-feedback/<int:pk>/', ai_feedback_delete, name='ai_feedback_delete'),
     

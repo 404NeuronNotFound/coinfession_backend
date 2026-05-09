@@ -3346,3 +3346,160 @@ def funding_fee_log_views(request, trade_pk):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+# ─── ML-Enhanced AI Feedback (TEST ENDPOINT) ──────────────────────────────────────
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_generate_ml_test(request):
+    """
+    POST /api/ai-feedback/generate-ml-test/
+    TEST ENDPOINT: Generates AI feedback using ML-enhanced analyzer.
+    
+    This is a test endpoint to safely test the ML analyzer without affecting
+    the existing AI feedback system. Once verified, we can switch the main
+    endpoint to use ML or provide a toggle.
+    
+    Request body (optional):
+    {
+        "year": 2024,
+        "month": 4
+    }
+    
+    Response:
+    {
+        "id": 1,
+        "prompt_summary": "ML-analyzed 45 trades (38 closed) for April 2024",
+        "feedback_text": "{...json...}",
+        "month_label": "April 2024",
+        "created_at": "2024-04-20T10:30:00Z"
+    }
+    """
+    from .ml_trading_analyzer import MLTradingAnalyzer
+    from django.utils import timezone
+    import calendar
+    
+    user = request.user
+    year = request.data.get('year')
+    month = request.data.get('month')
+    
+    # Get trades for analysis
+    trades_query = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
+    if year:
+        trades_query = trades_query.filter(trade_date__year=int(year))
+    if month:
+        trades_query = trades_query.filter(trade_date__month=int(month))
+    
+    trades = list(trades_query.order_by('trade_date'))
+    
+    if not trades:
+        return Response(
+            {'error': 'No trades found for the specified period.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        # Analyze trades using ML-enhanced analyzer
+        analyzer = MLTradingAnalyzer(trades)
+        feedback_text = analyzer.generate_feedback()
+        
+        # Determine month label
+        if year and month:
+            month_label = f"{calendar.month_name[int(month)]} {year}"
+        elif year:
+            month_label = f"{year}"
+        else:
+            month_label = f"{timezone.now().strftime('%B %Y')}"
+        
+        # Create prompt summary
+        closed_count = len([t for t in trades if (t.position_type == 'spot' and t.sell_price and t.buy_price) or (t.position_type in ['long', 'short'] and t.exit_price and t.entry_price and not t.is_open)])
+        prompt_summary = f"ML-analyzed {len(trades)} trades ({closed_count} closed) for {month_label}"
+        
+        # Save feedback with ML prefix in month_label to distinguish it
+        feedback = AIFeedback.objects.create(
+            user=user,
+            prompt_summary=prompt_summary,
+            feedback_text=feedback_text,
+            month_label=f"[ML TEST] {month_label}"
+        )
+        
+        serializer = AIFeedbackSerializer(feedback)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"ML Analyzer Error: {error_detail}")  # Log to console
+        return Response(
+            {
+                'error': 'ML analyzer failed',
+                'detail': str(e),
+                'traceback': error_detail if settings.DEBUG else None
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def ai_feedback_ml_status(request):
+    """
+    GET /api/ai-feedback/ml-status/
+    Check if ML analyzer is ready and get model info.
+    
+    Response:
+    {
+        "ml_available": true,
+        "total_trades": 45,
+        "closed_trades": 38,
+        "min_trades_required": 10,
+        "can_train_ml": true,
+        "message": "ML models ready to train"
+    }
+    """
+    try:
+        from .ml_trading_analyzer import MIN_TRADES_FOR_ML
+    except ImportError as e:
+        return Response({
+            'ml_available': False,
+            'error': f'ML dependencies not installed: {str(e)}',
+            'total_trades': 0,
+            'closed_trades': 0,
+            'min_trades_required': 10,
+            'can_train_ml': False,
+            'message': 'ML libraries not available'
+        }, status=status.HTTP_200_OK)
+    
+    user = request.user
+    
+    # Get all user's trades
+    trades = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
+    total_trades = trades.count()
+    
+    # Count closed trades
+    closed_trades = 0
+    for trade in trades:
+        if trade.position_type == 'spot':
+            if trade.sell_price and trade.buy_price:
+                closed_trades += 1
+        else:
+            if trade.exit_price and trade.entry_price and not trade.is_open:
+                closed_trades += 1
+    
+    can_train_ml = closed_trades >= MIN_TRADES_FOR_ML
+    
+    if can_train_ml:
+        message = f"ML models ready to train with {closed_trades} closed trades"
+    else:
+        remaining = MIN_TRADES_FOR_ML - closed_trades
+        message = f"Need {remaining} more closed trades to enable ML analysis"
+    
+    return Response({
+        'ml_available': True,  # ML libraries are installed
+        'total_trades': total_trades,
+        'closed_trades': closed_trades,
+        'min_trades_required': MIN_TRADES_FOR_ML,
+        'can_train_ml': can_train_ml,
+        'message': message
+    }, status=status.HTTP_200_OK)
