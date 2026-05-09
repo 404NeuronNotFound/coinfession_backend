@@ -810,7 +810,7 @@ class PerTradeAnalysisSerializer(serializers.Serializer):
     trade_id = serializers.IntegerField()
     coin = serializers.CharField()
     position_type = serializers.CharField()
-    trade_type = serializers.CharField()
+    trade_type = serializers.CharField(required=False, allow_null=True)  # Optional for backward compatibility
     entry_price = serializers.FloatField()
     exit_price = serializers.FloatField()
     quantity = serializers.FloatField()
@@ -820,6 +820,7 @@ class PerTradeAnalysisSerializer(serializers.Serializer):
     trade_date = serializers.CharField()
     feedback = serializers.CharField()
     recommendation = serializers.CharField()
+    ml_insights = serializers.DictField(required=False, allow_null=True)  # Optional, only present in ML feedback
 
 
 class CoinRecommendationSerializer(serializers.Serializer):
@@ -847,6 +848,7 @@ class MarketInsightsSerializer(serializers.Serializer):
     coin_recommendations = CoinRecommendationSerializer(many=True)
     position_type_analysis = serializers.DictField()
     market_trend_summary = serializers.CharField()
+    optimal_trading_windows = serializers.DictField(required=False, allow_null=True)  # ML-specific: best hours/days
 
 
 class AIFeedbackParsedSerializer(serializers.Serializer):
@@ -859,6 +861,7 @@ class AIFeedbackParsedSerializer(serializers.Serializer):
     action_items = serializers.ListField(required=False)
     per_trade_analysis = PerTradeAnalysisSerializer(many=True, required=False)
     market_insights = MarketInsightsSerializer(required=False)
+    model_info = serializers.DictField(required=False, allow_null=True)  # ML-specific: model training info
 
 
 class AIFeedbackSerializer(serializers.ModelSerializer):
