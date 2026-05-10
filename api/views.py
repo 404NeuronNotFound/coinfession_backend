@@ -2518,9 +2518,9 @@ def ai_feedback_preview(request):
 def ai_feedback_generate(request):
     """
     POST /api/ai-feedback/generate/
-    Generates AI feedback using built-in rule-based analyzer.
+    Generates AI feedback using ML-enhanced analyzer.
     """
-    from .ai_analyzer import TradingAnalyzer
+    from .ml_trading_analyzer import MLTradingAnalyzer
     from django.utils import timezone
     import calendar
     
@@ -2543,32 +2543,46 @@ def ai_feedback_generate(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # Analyze trades using built-in analyzer
-    analyzer = TradingAnalyzer(trades)
-    feedback_text = analyzer.generate_feedback()
+    try:
+        # Analyze trades using ML-enhanced analyzer
+        analyzer = MLTradingAnalyzer(trades)
+        feedback_text = analyzer.generate_feedback()
+        
+        # Determine month label
+        if year and month:
+            month_label = f"{calendar.month_name[int(month)]} {year}"
+        elif year:
+            month_label = f"{year}"
+        else:
+            month_label = f"{timezone.now().strftime('%B %Y')}"
+        
+        # Create prompt summary
+        closed_count = len([t for t in trades if (t.position_type == 'spot' and t.sell_price and t.buy_price) or (t.position_type in ['long', 'short'] and t.exit_price and t.entry_price and not t.is_open)])
+        prompt_summary = f"Analyzed {len(trades)} trades ({closed_count} closed) for {month_label}"
+        
+        # Save feedback
+        feedback = AIFeedback.objects.create(
+            user=user,
+            prompt_summary=prompt_summary,
+            feedback_text=feedback_text,
+            month_label=month_label
+        )
+        
+        serializer = AIFeedbackSerializer(feedback)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
     
-    # Determine month label
-    if year and month:
-        month_label = f"{calendar.month_name[int(month)]} {year}"
-    elif year:
-        month_label = f"{year}"
-    else:
-        month_label = f"{timezone.now().strftime('%B %Y')}"
-    
-    # Create prompt summary
-    closed_count = len([t for t in trades if t.sell_price and t.buy_price])
-    prompt_summary = f"Analyzed {len(trades)} trades ({closed_count} closed) for {month_label}"
-    
-    # Save feedback
-    feedback = AIFeedback.objects.create(
-        user=user,
-        prompt_summary=prompt_summary,
-        feedback_text=feedback_text,
-        month_label=month_label
-    )
-    
-    serializer = AIFeedbackSerializer(feedback)
-    return Response(serializer.data, status=status.HTTP_201_CREATED)
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
+        print(f"ML Analyzer Error: {error_detail}")
+        return Response(
+            {
+                'error': 'Failed to generate feedback',
+                'detail': str(e),
+                'traceback': error_detail if settings.DEBUG else None
+            },
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
 
 
 @api_view(['GET'])
@@ -3349,157 +3363,153 @@ def funding_fee_log_views(request, trade_pk):
 
 
 
-# ─── ML-Enhanced AI Feedback (TEST ENDPOINT) ──────────────────────────────────────
+# ─── Trading Chat (Ollama LLM) ────────────────────────────────────────────────
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
-def ai_feedback_generate_ml_test(request):
+def trading_chat(request):
     """
-    POST /api/ai-feedback/generate-ml-test/
-    TEST ENDPOINT: Generates AI feedback using ML-enhanced analyzer.
+    POST /api/trading-chat/
+    Chat with AI trading coach about your trades and performance.
     
-    This is a test endpoint to safely test the ML analyzer without affecting
-    the existing AI feedback system. Once verified, we can switch the main
-    endpoint to use ML or provide a toggle.
-    
-    Request body (optional):
+    Request body:
     {
-        "year": 2024,
-        "month": 4
+        "message": "How am I doing this month?",
+        "history": [
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "..."}
+        ]
     }
     
     Response:
     {
-        "id": 1,
-        "prompt_summary": "ML-analyzed 45 trades (38 closed) for April 2024",
-        "feedback_text": "{...json...}",
-        "month_label": "April 2024",
-        "created_at": "2024-04-20T10:30:00Z"
+        "reply": "Based on your data...",
+        "model": "llama3",
+        "status": "ok",
+        "updated_history": [...]
     }
     """
-    from .ml_trading_analyzer import MLTradingAnalyzer
-    from django.utils import timezone
-    import calendar
+    from .trading_chat import TradingChatAssistant
+    import json
     
-    user = request.user
-    year = request.data.get('year')
-    month = request.data.get('month')
-    
-    # Get trades for analysis
-    trades_query = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
-    if year:
-        trades_query = trades_query.filter(trade_date__year=int(year))
-    if month:
-        trades_query = trades_query.filter(trade_date__month=int(month))
-    
-    trades = list(trades_query.order_by('trade_date'))
-    
-    if not trades:
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
         return Response(
-            {'error': 'No trades found for the specified period.'},
+            {'error': 'Invalid JSON'},
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    try:
-        # Analyze trades using ML-enhanced analyzer
-        analyzer = MLTradingAnalyzer(trades)
-        feedback_text = analyzer.generate_feedback()
-        
-        # Determine month label
-        if year and month:
-            month_label = f"{calendar.month_name[int(month)]} {year}"
-        elif year:
-            month_label = f"{year}"
-        else:
-            month_label = f"{timezone.now().strftime('%B %Y')}"
-        
-        # Create prompt summary
-        closed_count = len([t for t in trades if (t.position_type == 'spot' and t.sell_price and t.buy_price) or (t.position_type in ['long', 'short'] and t.exit_price and t.entry_price and not t.is_open)])
-        prompt_summary = f"ML-analyzed {len(trades)} trades ({closed_count} closed) for {month_label}"
-        
-        # Save feedback with ML prefix in month_label to distinguish it
-        feedback = AIFeedback.objects.create(
-            user=user,
-            prompt_summary=prompt_summary,
-            feedback_text=feedback_text,
-            month_label=f"[ML TEST] {month_label}"
-        )
-        
-        serializer = AIFeedbackSerializer(feedback)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
-    
-    except Exception as e:
-        import traceback
-        error_detail = traceback.format_exc()
-        print(f"ML Analyzer Error: {error_detail}")  # Log to console
+    user_message = data.get('message', '').strip()
+    if not user_message:
         return Response(
-            {
-                'error': 'ML analyzer failed',
-                'detail': str(e),
-                'traceback': error_detail if settings.DEBUG else None
-            },
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            {'error': 'Message is required'},
+            status=status.HTTP_400_BAD_REQUEST
         )
+    
+    history = data.get('history', [])
+    
+    # Get user's trades
+    trades = Trade.objects.filter(user=request.user)
+    
+    # Initialize assistant
+    assistant = TradingChatAssistant(
+        user=request.user,
+        trades_queryset=trades
+    )
+    
+    # Get response
+    result = assistant.chat(user_message, conversation_history=history)
+    
+    return Response(result, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def trading_chat_stream(request):
+    """
+    POST /api/trading-chat/stream/
+    Stream chat response from AI trading coach (Server-Sent Events).
+    
+    Request body:
+    {
+        "message": "Analyze my recent trades",
+        "history": [...]
+    }
+    
+    Response: text/event-stream
+    data: {"chunk": "Based"}
+    data: {"chunk": " on"}
+    data: {"chunk": " your"}
+    ...
+    """
+    from .trading_chat import TradingChatAssistant
+    from django.http import StreamingHttpResponse
+    import json
+    
+    try:
+        data = json.loads(request.body) if request.body else {}
+    except json.JSONDecodeError:
+        return Response(
+            {'error': 'Invalid JSON'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    user_message = data.get('message', '').strip()
+    if not user_message:
+        return Response(
+            {'error': 'Message is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    history = data.get('history', [])
+    
+    # Get user's trades
+    trades = Trade.objects.filter(user=request.user)
+    
+    # Initialize assistant
+    assistant = TradingChatAssistant(
+        user=request.user,
+        trades_queryset=trades
+    )
+    
+    # Stream response
+    def generate():
+        for chunk in assistant.stream_chat(user_message, conversation_history=history):
+            yield f"data: {json.dumps({'chunk': chunk})}\n\n"
+    
+    return StreamingHttpResponse(
+        generate(),
+        content_type='text/event-stream'
+    )
 
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def ai_feedback_ml_status(request):
+def trading_chat_status(request):
     """
-    GET /api/ai-feedback/ml-status/
-    Check if ML analyzer is ready and get model info.
+    GET /api/trading-chat/status/
+    Check if Ollama is running and what models are available.
     
     Response:
     {
-        "ml_available": true,
-        "total_trades": 45,
-        "closed_trades": 38,
-        "min_trades_required": 10,
-        "can_train_ml": true,
-        "message": "ML models ready to train"
+        "running": true,
+        "available_models": ["llama3", "mistral"],
+        "recommended_model": "llama3"
     }
     """
-    try:
-        from .ml_trading_analyzer import MIN_TRADES_FOR_ML
-    except ImportError as e:
-        return Response({
-            'ml_available': False,
-            'error': f'ML dependencies not installed: {str(e)}',
-            'total_trades': 0,
-            'closed_trades': 0,
-            'min_trades_required': 10,
-            'can_train_ml': False,
-            'message': 'ML libraries not available'
-        }, status=status.HTTP_200_OK)
+    from .trading_chat import TradingChatAssistant
     
-    user = request.user
+    # Get user's trades (needed for assistant initialization)
+    trades = Trade.objects.filter(user=request.user)
     
-    # Get all user's trades
-    trades = Trade.objects.filter(user=user).select_related('coin').prefetch_related('emotions__emotion_tag')
-    total_trades = trades.count()
+    # Initialize assistant
+    assistant = TradingChatAssistant(
+        user=request.user,
+        trades_queryset=trades
+    )
     
-    # Count closed trades
-    closed_trades = 0
-    for trade in trades:
-        if trade.position_type == 'spot':
-            if trade.sell_price and trade.buy_price:
-                closed_trades += 1
-        else:
-            if trade.exit_price and trade.entry_price and not trade.is_open:
-                closed_trades += 1
+    # Check Ollama status
+    status_info = assistant.check_ollama_status()
     
-    can_train_ml = closed_trades >= MIN_TRADES_FOR_ML
-    
-    if can_train_ml:
-        message = f"ML models ready to train with {closed_trades} closed trades"
-    else:
-        remaining = MIN_TRADES_FOR_ML - closed_trades
-        message = f"Need {remaining} more closed trades to enable ML analysis"
-    
-    return Response({
-        'ml_available': True,  # ML libraries are installed
-        'total_trades': total_trades,
-        'closed_trades': closed_trades,
-        'min_trades_required': MIN_TRADES_FOR_ML,
-        'can_train_ml': can_train_ml,
-        'message': message
-    }, status=status.HTTP_200_OK)
+    return Response(status_info, status=status.HTTP_200_OK)

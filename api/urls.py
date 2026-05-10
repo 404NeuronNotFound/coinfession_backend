@@ -30,8 +30,6 @@ from .views import (
     ai_feedback_generate,
     ai_feedback_list,
     ai_feedback_delete,
-    ai_feedback_generate_ml_test,
-    ai_feedback_ml_status,
     dashboard_overview,
     danger_zone_status,
     reset_portfolio_snapshots,
@@ -41,6 +39,9 @@ from .views import (
     delete_account,
     open_positions,
     funding_fee_log_views,
+    trading_chat,
+    trading_chat_stream,
+    trading_chat_status,
 )
 
 urlpatterns = [
@@ -93,8 +94,6 @@ urlpatterns = [
     # AI Feedback (preview and generate must come before <int:pk>)
     path('ai-feedback/preview/', ai_feedback_preview, name='ai_feedback_preview'),
     path('ai-feedback/generate/', ai_feedback_generate, name='ai_feedback_generate'),
-    path('ai-feedback/generate-ml-test/', ai_feedback_generate_ml_test, name='ai_feedback_generate_ml_test'),
-    path('ai-feedback/ml-status/', ai_feedback_ml_status, name='ai_feedback_ml_status'),
     path('ai-feedback/', ai_feedback_list, name='ai_feedback_list'),
     path('ai-feedback/<int:pk>/', ai_feedback_delete, name='ai_feedback_delete'),
     
@@ -108,4 +107,9 @@ urlpatterns = [
     path('danger-zone/delete-ai-feedback/', delete_ai_feedback_all, name='delete_ai_feedback_all'),
     path('danger-zone/delete-trades/', delete_all_trades, name='delete_all_trades'),
     path('danger-zone/delete-account/', delete_account, name='delete_account'),
+    
+    # Trading Chat (Ollama LLM)
+    path('trading-chat/', trading_chat, name='trading_chat'),
+    path('trading-chat/stream/', trading_chat_stream, name='trading_chat_stream'),
+    path('trading-chat/status/', trading_chat_status, name='trading_chat_status'),
 ]
