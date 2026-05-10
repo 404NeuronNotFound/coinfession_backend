@@ -662,12 +662,12 @@ class MLTradingAnalyzer:
     def _generate_insufficient_data_feedback(self):
         """Feedback when there's some data but not enough for ML"""
         return json.dumps({
-            'overall': f"You have {len(self.closed_trades)} closed trades. ML models require at least {MIN_TRADES_FOR_ML} trades for reliable predictions. Keep trading to unlock ML-powered insights.",
+            'overall': f"You have {len(self.closed_trades)} closed trades. ML (Machine Learning) models require at least {MIN_TRADES_FOR_ML} trades for reliable predictions. Keep trading to unlock ML-powered insights.",
             'scores': self._calculate_scores(),
             'model_info': {'status': 'Not enough data', 'trades_used': len(self.closed_trades)},
             'whats_working': self._identify_strengths(),
             'whats_hurting': self._identify_weaknesses(),
-            'one_thing_to_fix': f"Close {MIN_TRADES_FOR_ML - len(self.closed_trades)} more trades to enable ML analysis",
+            'one_thing_to_fix': f"Close {MIN_TRADES_FOR_ML - len(self.closed_trades)} more trades to enable ML (Machine Learning) analysis",
             'action_items': self._generate_action_items(),
             'per_trade_analysis': [],
             'market_insights': {}
@@ -691,7 +691,7 @@ class MLTradingAnalyzer:
         
         # Add ML insight if available
         if self.model_trained and self.cross_val_score:
-            tone += f"ML model trained on {len(self.closed_trades)} trades with {self.cross_val_score:.1%} prediction accuracy. "
+            tone += f"ML (Machine Learning) model trained on {len(self.closed_trades)} trades with {self.cross_val_score:.1%} prediction accuracy. "
         
         return tone
     
@@ -766,8 +766,8 @@ class MLTradingAnalyzer:
             best_coin_ml = self._get_ml_best_coin()
             if best_coin_ml:
                 strengths.append({
-                    'title': f'{best_coin_ml} - ML Recommended',
-                    'body': f"ML model predicts highest win probability for {best_coin_ml}. Consider focusing more trades here."
+                    'title': f'{best_coin_ml} - ML (Machine Learning) Recommended',
+                    'body': f"ML (Machine Learning) model predicts highest win probability for {best_coin_ml}. Consider focusing more trades here."
                 })
         
         # Best profitable emotion cluster
@@ -777,7 +777,7 @@ class MLTradingAnalyzer:
                 best_emotion = max(profitable_emotions, key=lambda e: sum(self.stats['emotions'].get(e, [0])))
                 strengths.append({
                     'title': f'Trading {best_emotion} Works',
-                    'body': f"ML clustered '{best_emotion}' as Profitable. Trade more when you feel this way."
+                    'body': f"ML (Machine Learning) clustered '{best_emotion}' as Profitable. Trade more when you feel this way."
                 })
         
         # Strong win rate
@@ -839,7 +839,7 @@ class MLTradingAnalyzer:
                 total_loss = sum(self.stats['emotions'].get(worst_emotion, [0]))
                 weaknesses.append({
                     'title': f'Stop Trading {worst_emotion}',
-                    'body': f"ML clustered '{worst_emotion}' as Destructive (${abs(total_loss):.2f} lost). Avoid trading in this state."
+                    'body': f"ML (Machine Learning) clustered '{worst_emotion}' as Destructive (${abs(total_loss):.2f} lost). Avoid trading in this state."
                 })
         
         # Anomalous trades
@@ -1108,4 +1108,4 @@ class MLTradingAnalyzer:
     
     def _generate_market_trend_summary(self):
         """Generate market trend summary"""
-        return "ML-enhanced analysis based on your trading history. Check optimal_trading_windows for best times to trade."
+        return "ML (Machine Learning) enhanced analysis based on your trading history. Check optimal_trading_windows for best times to trade."
