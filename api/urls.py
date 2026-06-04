@@ -11,6 +11,7 @@ from .views import (
     get_refresh_tokens,
     revoke_token,
     CustomTokenObtainPairView,
+    logout_view,
     TradeListCreateView,
     TradeDetailView,
     trade_summary,
@@ -59,6 +60,7 @@ urlpatterns = [
     # JWT Token
     path('token/', CustomTokenObtainPairView.as_view(), name='get_token'),
     path('token/refresh/', TokenRefreshView.as_view(), name='refresh'),
+    path('auth/logout/', logout_view, name='logout'),
     
     # Trade Log (must come before trades/<int:pk>/)
     path('trades/summary/', trade_summary, name='trade_summary'),

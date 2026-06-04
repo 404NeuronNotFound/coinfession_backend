@@ -395,9 +395,60 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
 class CustomTokenObtainPairView(JWTTokenObtainPairView):
     """
-    Custom token view that creates session and token records.
+    Custom token view that creates session/token records and sets HttpOnly cookies.
     """
     serializer_class = CustomTokenObtainPairSerializer
+    
+    def post(self, request, *args, **kwargs):
+        # Get the standard JWT response
+        response = super().post(request, *args, **kwargs)
+        
+        if response.status_code == 200:
+            # Extract tokens from response
+            access_token = response.data.get('access')
+            refresh_token = response.data.get('refresh')
+            
+            # Set HttpOnly cookies
+            response.set_cookie(
+                key='access_token',
+                value=access_token,
+                httponly=True,
+                secure=False,  # Set to True in production with HTTPS
+                samesite='Lax',
+                max_age=1800,  # 30 minutes (match ACCESS_TOKEN_LIFETIME)
+            )
+            
+            response.set_cookie(
+                key='refresh_token',
+                value=refresh_token,
+                httponly=True,
+                secure=False,  # Set to True in production with HTTPS
+                samesite='Lax',
+                max_age=86400,  # 1 day (match REFRESH_TOKEN_LIFETIME)
+            )
+            
+            # Also return tokens in response for backward compatibility
+            # Frontend can choose to use cookies or tokens
+            
+        return response
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_view(request):
+    """
+    Logout endpoint that clears HttpOnly cookies.
+    """
+    response = Response({
+        'message': 'Logged out successfully',
+        'status': 'success'
+    })
+    
+    # Delete the HttpOnly cookies
+    response.delete_cookie('access_token')
+    response.delete_cookie('refresh_token')
+    
+    return response
 
 
 # ─── Trade Log Views ──────────────────────────────────────
@@ -2574,7 +2625,10 @@ def ai_feedback_generate(request):
     except Exception as e:
         import traceback
         error_detail = traceback.format_exc()
-        print(f"ML Analyzer Error: {error_detail}")
+        # Log to server logs without sensitive details
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("ML Analyzer failed to generate feedback")
         return Response(
             {
                 'error': 'Failed to generate feedback',
