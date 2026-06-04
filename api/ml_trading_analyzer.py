@@ -494,7 +494,10 @@ class MLTradingAnalyzer:
             self.model_trained = True
             
         except Exception as e:
-            print(f"Model training failed: {e}")
+            # Log training failure without exposing sensitive data
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("ML model training failed")
             self.model_trained = False
     
     def _cluster_emotions(self, df):

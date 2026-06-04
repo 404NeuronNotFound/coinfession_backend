@@ -114,7 +114,10 @@ class TradingChatAssistant:
             return result
             
         except Exception as e:
-            print(f"CoinGecko API error: {str(e)}")
+            # Log error without exposing sensitive API details
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("CoinGecko API request failed")
             return {}
     
     def build_user_context(self) -> str:
